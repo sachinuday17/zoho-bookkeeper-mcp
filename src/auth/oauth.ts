@@ -99,7 +99,7 @@ async function refreshAccessToken(config: {
       expiresAt: Date.now() + expiresIn * 1000,
     }
 
-    console.log("Zoho access token refreshed successfully")
+    // Security: Removed console.log to prevent token refresh timing leakage in logs
     return tokenState.accessToken
   } catch (error) {
     if (error instanceof ZohoAuthError) {

@@ -6,6 +6,7 @@ import { z } from "zod"
 import type { FastMCP } from "fastmcp"
 import { zohoGet, zohoPost, zohoUploadAttachment, zohoDeleteAttachment } from "../api/client.js"
 import type { Bill, BillLineItem, Attachment } from "../api/types.js"
+import { optionalOrganizationIdSchema } from "../utils/validation.js"
 
 // Zod schema for bill line items
 const billLineItemSchema = z.object({
@@ -26,10 +27,9 @@ export function registerBillTools(server: FastMCP): void {
 Supports filtering by date, vendor, and status.
 Returns bill details with vendor, amount, and due date.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       date_start: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_end: z.string().optional().describe("End date (YYYY-MM-DD)"),
       vendor_id: z.string().optional().describe("Filter by vendor"),
@@ -90,10 +90,9 @@ Returns bill details with vendor, amount, and due date.`,
     description: `Get detailed information about a specific bill.
 Returns full bill details including line items and vendor info.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       bill_id: z.string().describe("Bill ID"),
     }),
     annotations: {
@@ -147,10 +146,9 @@ Returns full bill details including line items and vendor info.`,
 Use list_contacts to find vendor_id values.
 Use list_accounts to find account_id values for line items.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       vendor_id: z.string().describe("Vendor ID"),
       bill_number: z.string().optional().describe("Bill/Invoice number from vendor"),
       date: z.string().describe("Bill date (YYYY-MM-DD)"),
@@ -206,10 +204,9 @@ Use this bill_id to add attachments.`
 Supported file types: PDF, PNG, JPG, JPEG, GIF, DOC, DOCX, XLS, XLSX.
 Use this to attach vendor invoices or supporting documents.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       bill_id: z.string().describe("Bill ID to attach file to"),
       file_path: z.string().describe("Full local file path to the attachment"),
     }),
@@ -242,10 +239,9 @@ Use this to attach vendor invoices or supporting documents.`,
     description: `Get attachment information for a bill.
 Returns details about any files attached to the bill.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       bill_id: z.string().describe("Bill ID"),
     }),
     annotations: {
@@ -284,10 +280,9 @@ Returns details about any files attached to the bill.`,
     description: `Delete attachment from a bill.
 Removes the file association from the bill.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       bill_id: z.string().describe("Bill ID"),
     }),
     annotations: {

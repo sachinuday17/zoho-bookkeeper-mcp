@@ -34,7 +34,7 @@ export async function parseZohoResponse<T>(
           category: response.status >= 500 ? "server" : "unknown",
           suggestedAction: "Check the API endpoint and try again",
           endpoint,
-          rawResponse: responseText,
+          // Note: rawResponse intentionally omitted to prevent leaking sensitive data
         },
         errorMessage: `HTTP ${response.status}: ${response.statusText}`,
       }
@@ -80,11 +80,47 @@ export async function parseZohoResponse<T>(
   }
 }
 
+// Whitelist of valid Zoho response keys to prevent arbitrary object access
+const VALID_RESPONSE_KEYS = new Set([
+  "organization",
+  "organizations",
+  "journal",
+  "journals",
+  "expense",
+  "expenses",
+  "bill",
+  "bills",
+  "invoice",
+  "invoices",
+  "contact",
+  "contacts",
+  "bankaccount",
+  "bankaccounts",
+  "banktransaction",
+  "banktransactions",
+  "chartofaccount",
+  "chartofaccounts",
+  "attachment",
+  "documents",
+  "page_context",
+  "message",
+  "code",
+])
+
 /**
  * Extract the main data from a Zoho response
  * Zoho responses typically have the data nested under a specific key
+ * Security: Only allows access to whitelisted keys
  */
 export function extractData<T>(response: Record<string, unknown>, key: string): T | undefined {
+  if (!VALID_RESPONSE_KEYS.has(key)) {
+    // Security: Sanitize key to prevent log injection (remove newlines, limit length)
+    const sanitizedKey = String(key)
+      .replace(/[\r\n]/g, "")
+      .slice(0, 50)
+    // Fail fast on non-whitelisted keys to prevent silent failures
+    throw new Error(`Non-whitelisted response key: ${sanitizedKey}`)
+  }
   return response[key] as T | undefined
 }
 

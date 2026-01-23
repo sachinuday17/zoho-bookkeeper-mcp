@@ -51,11 +51,12 @@ describe("Error Handling Utilities", () => {
       expect(error.suggestedAction).toContain("documentation")
     })
 
-    it("includes raw response when provided", () => {
+    it("does not include raw response for security (prevents data leakage)", () => {
       const rawResponse = '{"code":4,"message":"Invalid"}'
       const error = parseZohoError(4, "Invalid", "/test", rawResponse)
 
-      expect(error.rawResponse).toBe(rawResponse)
+      // Security: rawResponse is intentionally not included to prevent sensitive data leakage
+      expect(error).not.toHaveProperty("rawResponse")
     })
   })
 

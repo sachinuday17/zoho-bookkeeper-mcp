@@ -1,0 +1,24 @@
+[config]
+model = "claude-sonnet-4-20250514"
+
+[pr_reviewer]
+extra_instructions = """
+Focus on:
+1. Security vulnerabilities (injection, path traversal, data leakage)
+2. Logic bugs affecting Zoho API integration
+3. Error handling gaps
+4. OAuth token security
+
+Ignore:
+- Style issues (handled by ESLint/Prettier)
+- Minor refactoring suggestions
+"""
+
+[pr_description]
+publish_labels = true
+add_original_user_description = true
+
+[github_action_config]
+auto_review = true
+auto_describe = true
+auto_improve = false

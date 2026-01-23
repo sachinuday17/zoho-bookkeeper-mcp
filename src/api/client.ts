@@ -5,9 +5,117 @@
 import * as fs from "fs"
 import * as path from "path"
 import { getAccessToken, ZohoAuthError } from "../auth/oauth.js"
-import { getZohoConfig } from "../config.js"
+import { getZohoConfig, MAX_FILE_SIZE_BYTES, REQUEST_TIMEOUT_MS } from "../config.js"
 import { getMimeType, validateAttachment } from "../utils/mime-types.js"
 import { parseZohoResponse, type ParsedResponse } from "../utils/response-parser.js"
+
+// Security: Allowed base directories for file uploads
+// Files can only be uploaded from these directories or their subdirectories
+const ALLOWED_UPLOAD_DIRECTORIES = [
+  "/app/documents", // Docker container path
+  "/tmp/zoho-bookkeeper-uploads", // App-specific temp directory (narrower than /tmp)
+  process.env.HOME ? path.join(process.env.HOME, "Documents") : undefined, // User documents
+  process.env.ZOHO_ALLOWED_UPLOAD_DIR, // Optional override/additional safe directory
+].filter((d): d is string => Boolean(d))
+
+/**
+ * Normalize path for cross-platform comparison
+ * Security: Handles case-insensitive filesystems (Windows, macOS with default settings)
+ */
+function normalizeForCompare(p: string): string {
+  const normalized = path.normalize(p)
+  // Windows and macOS (default) have case-insensitive filesystems
+  return process.platform === "win32" || process.platform === "darwin"
+    ? normalized.toLowerCase()
+    : normalized
+}
+
+/**
+ * Sanitize filename for multipart upload
+ * Security: Prevents header injection via CR/LF and path traversal via separators
+ */
+function sanitizeFilename(filename: string): string {
+  return filename
+    .replace(/[\r\n]/g, "") // Strip CR/LF to prevent header injection
+    .replace(/[/\\]/g, "_") // Replace path separators to prevent traversal
+}
+
+/**
+ * Validate that a file path is within allowed directories (prevent path traversal)
+ * Security: Prevents reading arbitrary files like /etc/passwd
+ * Security: Uses realpath to resolve symlinks and prevent symlink-based attacks
+ * Security: Returns resolvedPath to prevent TOCTOU attacks
+ * Security: Uses normalized paths for case-insensitive filesystem comparison
+ */
+function validateFilePath(filePath: string): {
+  valid: boolean
+  error?: string
+  resolvedPath?: string
+} {
+  const resolvedInput = path.resolve(filePath)
+
+  // Prefer canonical path when file exists (symlink protection), otherwise use resolved path
+  let realPath = resolvedInput
+  try {
+    if (fs.existsSync(filePath)) {
+      realPath = fs.realpathSync(filePath)
+    }
+  } catch {
+    realPath = resolvedInput
+  }
+
+  // Check if real path is within allowed directories (using normalized comparison)
+  const normalizedRealPath = normalizeForCompare(realPath)
+
+  const isAllowed = ALLOWED_UPLOAD_DIRECTORIES.some((allowedDir) => {
+    const resolvedAllowed = path.resolve(allowedDir)
+
+    // Prefer canonical path for allowed dir, fall back to resolved if it doesn't exist
+    let allowedReal = resolvedAllowed
+    try {
+      if (fs.existsSync(allowedDir)) {
+        allowedReal = fs.realpathSync(allowedDir)
+      }
+    } catch {
+      allowedReal = resolvedAllowed
+    }
+
+    const normalizedAllowed = normalizeForCompare(allowedReal)
+    return (
+      normalizedRealPath === normalizedAllowed ||
+      normalizedRealPath.startsWith(normalizedAllowed + path.sep)
+    )
+  })
+
+  if (!isAllowed) {
+    return {
+      valid: false,
+      error: "File path not in allowed upload directories",
+    }
+  }
+
+  return { valid: true, resolvedPath: realPath }
+}
+
+/**
+ * Create an AbortController with timeout
+ * Security: Prevents hanging requests
+ */
+function createTimeoutController(timeoutMs: number = REQUEST_TIMEOUT_MS): {
+  controller: AbortController
+  timeoutId: ReturnType<typeof setTimeout>
+  timeoutMs: number
+} {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  // Prevent the timeout from keeping the process alive (useful for tests/CLI)
+  if (typeof timeoutId === "object" && "unref" in timeoutId) {
+    timeoutId.unref()
+  }
+
+  return { controller, timeoutId, timeoutMs }
+}
 
 /**
  * Resolve organization ID from parameter or environment config
@@ -75,12 +183,16 @@ export async function zohoRequest<T>(
     })
   }
 
+  // Security: Add request timeout
+  const { controller, timeoutId, timeoutMs } = createTimeoutController()
+
   const options: RequestInit = {
     method,
     headers: {
       Authorization: `Zoho-oauthtoken ${token}`,
       "Content-Type": "application/json",
     },
+    signal: controller.signal,
   }
 
   if (body && method !== "GET" && method !== "HEAD") {
@@ -92,10 +204,18 @@ export async function zohoRequest<T>(
     const response = await fetch(url.toString(), options)
     return parseZohoResponse<T>(response, endpoint)
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return {
+        ok: false,
+        errorMessage: `Request timeout after ${timeoutMs / 1000} seconds`,
+      }
+    }
     return {
       ok: false,
       errorMessage: `Request failed: ${error instanceof Error ? error.message : String(error)}`,
     }
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
@@ -164,13 +284,77 @@ export async function zohoUploadAttachment(
 
   let token: string
 
-  // Validate the attachment file
-  const validation = validateAttachment(filePath)
+  // Security: Validate file path is within allowed directories (prevent path traversal)
+  const pathValidation = validateFilePath(filePath)
+  if (!pathValidation.valid || !pathValidation.resolvedPath) {
+    return {
+      ok: false,
+      errorMessage: pathValidation.error || "Invalid file path",
+    }
+  }
+
+  // Security: Use resolved path for all subsequent operations to prevent TOCTOU attacks
+  const resolvedPath = pathValidation.resolvedPath
+
+  // Validate the attachment file type using resolved path (ensures checks match the file being uploaded)
+  const validation = validateAttachment(resolvedPath)
   if (!validation.valid) {
     return {
       ok: false,
       errorMessage: validation.error,
     }
+  }
+
+  // Security: Open file once and validate/read via same handle (prevents TOCTOU + avoids blocking I/O)
+  let fileBuffer: Buffer
+  let fileName: string
+  let mimeType: string
+
+  let fh: fs.promises.FileHandle | undefined
+  try {
+    // Security: Use O_NOFOLLOW to prevent symlink-based path traversal attacks
+    const flags =
+      typeof fs.constants.O_NOFOLLOW === "number"
+        ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+        : fs.constants.O_RDONLY
+
+    fh = await fs.promises.open(resolvedPath, flags)
+    const stats = await fh.stat()
+
+    // Security: Ensure it's a regular file (rejects directories, FIFOs, sockets, devices)
+    if (!stats.isFile()) {
+      return {
+        ok: false,
+        errorMessage: "Upload path must be a regular file",
+      }
+    }
+
+    // Security: Validate file size (prevent OOM)
+    if (stats.size > MAX_FILE_SIZE_BYTES) {
+      return {
+        ok: false,
+        errorMessage: `File too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB (max ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB)`,
+      }
+    }
+
+    fileBuffer = await fh.readFile()
+    // Security: Sanitize filename to prevent header injection and path traversal
+    fileName = sanitizeFilename(path.basename(resolvedPath))
+    mimeType = getMimeType(resolvedPath)
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException
+    if (err?.code === "ELOOP") {
+      return {
+        ok: false,
+        errorMessage: "Symlinks are not allowed for uploads",
+      }
+    }
+    return {
+      ok: false,
+      errorMessage: "File not found or inaccessible",
+    }
+  } finally {
+    await fh?.close().catch(() => undefined)
   }
 
   try {
@@ -188,26 +372,16 @@ export async function zohoUploadAttachment(
     }
   }
 
-  // Check if file exists
-  if (!fs.existsSync(filePath)) {
-    return {
-      ok: false,
-      errorMessage: `File not found: ${filePath}`,
-    }
-  }
-
   // Build URL
   const url = new URL(`${config.apiUrl}${endpoint}`)
   url.searchParams.set("organization_id", orgIdResult.orgId)
 
-  // Read file and create FormData
-  const fileBuffer = fs.readFileSync(filePath)
-  const fileName = path.basename(filePath)
-  const mimeType = getMimeType(filePath)
-
   const formData = new FormData()
   const blob = new Blob([fileBuffer], { type: mimeType })
   formData.append("attachment", blob, fileName)
+
+  // Security: Add request timeout
+  const { controller, timeoutId, timeoutMs } = createTimeoutController()
 
   try {
     const response = await fetch(url.toString(), {
@@ -217,14 +391,23 @@ export async function zohoUploadAttachment(
         // DO NOT set Content-Type header - let fetch set it with the correct multipart boundary
       },
       body: formData,
+      signal: controller.signal,
     })
 
     return parseZohoResponse<Record<string, unknown>>(response, endpoint)
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return {
+        ok: false,
+        errorMessage: `Upload timeout after ${timeoutMs / 1000} seconds`,
+      }
+    }
     return {
       ok: false,
       errorMessage: `Upload failed: ${error instanceof Error ? error.message : String(error)}`,
     }
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
@@ -270,6 +453,9 @@ export async function zohoListOrganizations(): Promise<ParsedResponse<Record<str
     }
   }
 
+  // Security: Add request timeout
+  const { controller, timeoutId, timeoutMs } = createTimeoutController()
+
   try {
     const response = await fetch(`${config.apiUrl}/organizations`, {
       method: "GET",
@@ -277,13 +463,22 @@ export async function zohoListOrganizations(): Promise<ParsedResponse<Record<str
         Authorization: `Zoho-oauthtoken ${token}`,
         "Content-Type": "application/json",
       },
+      signal: controller.signal,
     })
 
     return parseZohoResponse<Record<string, unknown>>(response, "/organizations")
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return {
+        ok: false,
+        errorMessage: `Request timeout after ${timeoutMs / 1000} seconds`,
+      }
+    }
     return {
       ok: false,
       errorMessage: `Request failed: ${error instanceof Error ? error.message : String(error)}`,
     }
+  } finally {
+    clearTimeout(timeoutId)
   }
 }

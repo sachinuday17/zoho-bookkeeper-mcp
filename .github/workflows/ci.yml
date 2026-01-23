@@ -6,37 +6,85 @@ on:
   pull_request:
     branches: [main]
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+jobs:
+  # Stage 1: Build & Lint
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+      - run: pnpm install
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm build
+
+  # Stage 2: Test with Coverage
+  test:
+    needs: build
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         node-version: [20, 22]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'pnpm'
+      - run: pnpm install
+      - run: pnpm test
+      - name: Coverage Report
+        if: matrix.node-version == 22
+        run: pnpm test:coverage
+        continue-on-error: true
+      - name: Upload Coverage
+        if: matrix.node-version == 22 && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: warn
 
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Check formatting
-        run: pnpm format:check
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Build
-        run: pnpm build
-
-      - name: Run tests
-        run: pnpm test
+  # Stage 3: Coverage Analysis
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage-report
+          path: coverage/
+      - name: Check Coverage Threshold
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = 'coverage/coverage-summary.json';
+          if (!fs.existsSync(p)) {
+            console.log('::warning::No coverage-summary.json found; skipping coverage threshold check');
+            process.exit(0);
+          }
+          const s = JSON.parse(fs.readFileSync(p, 'utf8'));
+          const cov = Number(s?.total?.lines?.pct);
+          console.log('Coverage: ' + cov + '%');
+          if (!Number.isFinite(cov)) {
+            console.log('::warning::Coverage value missing/invalid; skipping threshold check');
+            process.exit(0);
+          }
+          if (cov < 50) {
+            console.log('::error::Coverage below 50%');
+            process.exit(1);
+          }
+          "

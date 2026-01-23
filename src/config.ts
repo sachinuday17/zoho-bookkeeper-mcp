@@ -2,6 +2,10 @@
  * Environment configuration for Zoho Bookkeeper MCP Server
  */
 
+// Security constants
+export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 // 10MB
+export const REQUEST_TIMEOUT_MS = 30000 // 30 seconds
+
 export interface ZohoConfig {
   clientId: string
   clientSecret: string
@@ -71,6 +75,10 @@ export function validateZohoConfig(config: ZohoConfig): { valid: boolean; error?
   }
   if (!config.refreshToken) {
     return { valid: false, error: "ZOHO_REFRESH_TOKEN is not configured" }
+  }
+  // Security: Enforce HTTPS for API URL
+  if (!config.apiUrl.startsWith("https://")) {
+    return { valid: false, error: "ZOHO_API_URL must use HTTPS" }
   }
   return { valid: true }
 }

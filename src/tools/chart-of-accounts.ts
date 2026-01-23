@@ -6,6 +6,7 @@ import { z } from "zod"
 import type { FastMCP } from "fastmcp"
 import { zohoGet, zohoPost } from "../api/client.js"
 import type { Account, AccountTransaction } from "../api/types.js"
+import { optionalOrganizationIdSchema } from "../utils/validation.js"
 
 /**
  * Register chart of accounts tools on the server
@@ -18,10 +19,9 @@ export function registerChartOfAccountsTools(server: FastMCP): void {
 Supports filtering by account type (e.g., income, expense, asset, liability, equity).
 Use this to find account_id values for journal entries and transactions.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       filter_by: z
         .enum([
           "AccountType.All",
@@ -87,10 +87,9 @@ Use this to find account_id values for journal entries and transactions.`,
     description: `Get detailed information about a specific account.
 Returns account details including balance, currency, and parent account info.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       account_id: z.string().describe("Account ID"),
     }),
     annotations: {
@@ -148,10 +147,9 @@ asset (bank, other_current_asset, fixed_asset, other_asset, cash, accounts_recei
 liability (other_current_liability, credit_card, long_term_liability, other_liability, accounts_payable),
 equity (equity, retained_earnings).`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       account_name: z.string().describe("Name for the new account"),
       account_type: z
         .string()
@@ -209,10 +207,9 @@ equity (equity, retained_earnings).`,
 Returns all transactions (journals, invoices, bills, etc.) affecting this account.
 Useful for account reconciliation and analysis.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       account_id: z.string().describe("Account ID to get transactions for"),
       date_start: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_end: z.string().optional().describe("End date (YYYY-MM-DD)"),

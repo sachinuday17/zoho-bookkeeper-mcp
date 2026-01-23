@@ -6,6 +6,7 @@ import { z } from "zod"
 import type { FastMCP } from "fastmcp"
 import { zohoGet } from "../api/client.js"
 import type { Contact } from "../api/types.js"
+import { optionalOrganizationIdSchema } from "../utils/validation.js"
 
 /**
  * Register contact tools on the server
@@ -18,10 +19,9 @@ export function registerContactTools(server: FastMCP): void {
 Supports filtering by contact type (customer or vendor).
 Use this to find contact_id values for bills, invoices, and expenses.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       contact_type: z.enum(["customer", "vendor"]).optional().describe("Filter by contact type"),
       status: z.enum(["active", "inactive", "crm", "all"]).optional().describe("Filter by status"),
       search_text: z.string().optional().describe("Search by name or company"),
@@ -80,10 +80,9 @@ Use this to find contact_id values for bills, invoices, and expenses.`,
     description: `Get detailed information about a specific contact.
 Returns full contact details including payment terms and currency settings.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
       contact_id: z.string().describe("Contact ID"),
     }),
     annotations: {

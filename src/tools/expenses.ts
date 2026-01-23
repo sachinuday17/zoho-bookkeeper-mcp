@@ -6,6 +6,13 @@ import { z } from "zod"
 import type { FastMCP } from "fastmcp"
 import { zohoGet, zohoPost, zohoUploadAttachment, zohoDeleteAttachment } from "../api/client.js"
 import type { Expense, Attachment } from "../api/types.js"
+import {
+  moneySchema,
+  entityIdSchema,
+  dateSchema,
+  optionalDateSchema,
+  optionalOrganizationIdSchema,
+} from "../utils/validation.js"
 
 /**
  * Register expense tools on the server
@@ -18,18 +25,17 @@ export function registerExpenseTools(server: FastMCP): void {
 Supports filtering by date, status, and customer.
 Returns expense details with account, amount, and vendor info.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
-      date_start: z.string().optional().describe("Start date (YYYY-MM-DD)"),
-      date_end: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      date_start: optionalDateSchema.describe("Start date (YYYY-MM-DD)"),
+      date_end: optionalDateSchema.describe("End date (YYYY-MM-DD)"),
       status: z
         .enum(["unbilled", "invoiced", "reimbursed", "non-billable"])
         .optional()
         .describe("Filter by status"),
-      customer_id: z.string().optional().describe("Filter by customer"),
-      vendor_id: z.string().optional().describe("Filter by vendor"),
+      customer_id: entityIdSchema.optional().describe("Filter by customer"),
+      vendor_id: entityIdSchema.optional().describe("Filter by vendor"),
       sort_column: z.enum(["date", "amount", "created_time"]).optional(),
       page: z.number().int().positive().optional(),
       per_page: z.number().int().min(1).max(200).optional(),
@@ -87,11 +93,10 @@ Returns expense details with account, amount, and vendor info.`,
     description: `Get detailed information about a specific expense.
 Returns full expense details including account, vendor, and billable status.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
-      expense_id: z.string().describe("Expense ID"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      expense_id: entityIdSchema.describe("Expense ID"),
     }),
     annotations: {
       title: "Get Expense Details",
@@ -137,18 +142,19 @@ Returns full expense details including account, vendor, and billable status.`,
 Requires account_id (expense account) and paid_through_account_id (payment account).
 Use list_accounts to find valid account IDs.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
-      account_id: z.string().describe("Expense account ID"),
-      paid_through_account_id: z.string().describe("Payment account ID (bank/cash/credit card)"),
-      date: z.string().describe("Expense date (YYYY-MM-DD)"),
-      amount: z.number().positive().describe("Expense amount"),
-      description: z.string().optional().describe("Description of the expense"),
-      reference_number: z.string().optional().describe("Reference number"),
-      customer_id: z.string().optional().describe("Customer ID if billable"),
-      vendor_id: z.string().optional().describe("Vendor ID"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      account_id: entityIdSchema.describe("Expense account ID"),
+      paid_through_account_id: entityIdSchema.describe(
+        "Payment account ID (bank/cash/credit card)"
+      ),
+      date: dateSchema.describe("Expense date (YYYY-MM-DD)"),
+      amount: moneySchema.describe("Expense amount (max 999,999,999.99, 2 decimal places)"),
+      description: z.string().max(500).optional().describe("Description of the expense"),
+      reference_number: z.string().max(100).optional().describe("Reference number"),
+      customer_id: entityIdSchema.optional().describe("Customer ID if billable"),
+      vendor_id: entityIdSchema.optional().describe("Vendor ID"),
       is_billable: z.boolean().optional().describe("Whether expense is billable to a customer"),
     }),
     annotations: {
@@ -201,14 +207,14 @@ Use this expense_id to add receipts.`
     name: "add_expense_receipt",
     description: `Upload a receipt attachment to an expense.
 Supported file types: PDF, PNG, JPG, JPEG, GIF, DOC, DOCX, XLS, XLSX.
-Use this to attach scanned receipts or invoice images.`,
+Use this to attach scanned receipts or invoice images.
+Files must be in allowed directories and under 10MB.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
-      expense_id: z.string().describe("Expense ID to attach receipt to"),
-      file_path: z.string().describe("Full local file path to the receipt"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      expense_id: entityIdSchema.describe("Expense ID to attach receipt to"),
+      file_path: z.string().max(500).describe("Full local file path to the receipt"),
     }),
     annotations: {
       title: "Add Expense Receipt",
@@ -239,11 +245,10 @@ Use this to attach scanned receipts or invoice images.`,
     description: `Get receipt/attachment information for an expense.
 Returns details about any files attached to the expense.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
-      expense_id: z.string().describe("Expense ID"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      expense_id: entityIdSchema.describe("Expense ID"),
     }),
     annotations: {
       title: "Get Expense Receipt",
@@ -281,11 +286,10 @@ Returns details about any files attached to the expense.`,
     description: `Delete receipt/attachment from an expense.
 Removes the file association from the expense.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
-      expense_id: z.string().describe("Expense ID"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      expense_id: entityIdSchema.describe("Expense ID"),
     }),
     annotations: {
       title: "Delete Expense Receipt",

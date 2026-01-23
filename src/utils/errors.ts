@@ -71,17 +71,19 @@ export interface ZohoApiError {
   category: "auth" | "validation" | "not_found" | "rate_limit" | "server" | "unknown"
   suggestedAction: string
   endpoint?: string
-  rawResponse?: string
+  // Note: rawResponse intentionally omitted from interface to prevent leaking sensitive data
 }
 
 /**
  * Parse a Zoho API error response into an AI-friendly format
+ * Note: rawResponse parameter kept for internal logging but NOT included in returned error
+ * to prevent leaking sensitive data in error messages
  */
 export function parseZohoError(
   code: number,
   apiMessage: string,
   endpoint?: string,
-  rawResponse?: string
+  _rawResponse?: string // Prefixed with _ to indicate intentionally unused (security)
 ): ZohoApiError {
   const knownError = ZOHO_ERROR_CODES[code]
 
@@ -92,7 +94,6 @@ export function parseZohoError(
       category: knownError.category,
       suggestedAction: knownError.action,
       endpoint,
-      rawResponse,
     }
   }
 
@@ -103,7 +104,6 @@ export function parseZohoError(
     category: "unknown",
     suggestedAction: "Check the Zoho Books API documentation for this error code",
     endpoint,
-    rawResponse,
   }
 }
 

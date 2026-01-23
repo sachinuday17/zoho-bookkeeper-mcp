@@ -6,6 +6,7 @@ import { z } from "zod"
 import type { FastMCP } from "fastmcp"
 import { zohoListOrganizations, zohoGet } from "../api/client.js"
 import type { Organization } from "../api/types.js"
+import { optionalOrganizationIdSchema } from "../utils/validation.js"
 
 /**
  * Register organization tools on the server
@@ -56,10 +57,9 @@ Returns organization name, ID, currency, and timezone.`,
     description: `Get detailed information about a specific organization.
 Returns full organization details including address, contact info, and settings.`,
     parameters: z.object({
-      organization_id: z
-        .string()
-        .optional()
-        .describe("Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"),
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
     }),
     annotations: {
       title: "Get Organization Details",

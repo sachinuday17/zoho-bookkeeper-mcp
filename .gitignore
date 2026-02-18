@@ -1,5 +1,9 @@
 node_modules/
+.pnpm-store/
+dist/
+coverage/
 .env
+.env.test
 *.log
 .DS_Store
 .claude/

@@ -24,85 +24,40 @@ const server = new FastMCP({
   instructions: `
 Zoho Books MCP server for bookkeeping workflows.
 
-## Getting Started
-1. First use \`list_organizations\` to get your organization_id
-2. Use that organization_id for all subsequent API calls
+## Organization ID
+The organization_id is pre-configured via ZOHO_ORGANIZATION_ID environment variable.
+You do NOT need to call list_organizations first - just use the tools directly.
 
-## Available Tool Categories
+## Available Tools
 
-### Organizations (2 tools)
-- list_organizations: List all Zoho organizations (use first to get org_id)
-- get_organization: Get organization details
-
-### Chart of Accounts (4 tools)
+### Chart of Accounts
 - list_accounts: List all accounts (find account_id values here)
 - get_account: Get account details
 - create_account: Create new account
 - list_account_transactions: List transactions for an account
 
-### Journals (9 tools)
-- list_journals: List journal entries
-- get_journal: Get journal details
-- create_journal: Create journal entry (debits must equal credits)
-- update_journal: Update journal entry
-- delete_journal: Delete journal entry
-- publish_journal: Publish/post a draft journal
-- add_journal_attachment: Upload file to journal
-- get_journal_attachment: Get journal attachment info
-- delete_journal_attachment: Remove journal attachment
+### Journals
+- list_journals, get_journal, create_journal, update_journal, delete_journal, publish_journal
+- add_journal_attachment, get_journal_attachment, delete_journal_attachment
 
-### Expenses (6 tools)
-- list_expenses: List expenses
-- get_expense: Get expense details
-- create_expense: Create expense
-- add_expense_receipt: Upload receipt to expense
-- get_expense_receipt: Get expense receipt info
-- delete_expense_receipt: Remove expense receipt
+### Expenses
+- list_expenses, get_expense, create_expense
+- add_expense_receipt, get_expense_receipt, delete_expense_receipt
 
-### Bills (6 tools)
-- list_bills: List bills (accounts payable)
-- get_bill: Get bill details
-- create_bill: Create bill
-- add_bill_attachment: Upload file to bill
-- get_bill_attachment: Get bill attachment info
-- delete_bill_attachment: Remove bill attachment
+### Bills
+- list_bills, get_bill, create_bill
+- add_bill_attachment, get_bill_attachment, delete_bill_attachment
 
-### Invoices (5 tools)
-- list_invoices: List invoices (accounts receivable)
-- get_invoice: Get invoice details
-- add_invoice_attachment: Upload file to invoice
-- get_invoice_attachment: Get invoice attachment info
-- delete_invoice_attachment: Remove invoice attachment
+### Invoices
+- list_invoices, get_invoice
+- add_invoice_attachment, get_invoice_attachment, delete_invoice_attachment
 
-### Contacts (2 tools)
-- list_contacts: List customers and vendors
-- get_contact: Get contact details
+### Contacts & Bank Accounts
+- list_contacts, get_contact
+- list_bank_accounts, get_bank_account, list_bank_transactions
 
-### Bank Accounts (3 tools)
-- list_bank_accounts: List bank accounts in Zoho
-- get_bank_account: Get bank account details
-- list_bank_transactions: List bank transactions
-
-## Common Workflows
-
-### Create a Journal Entry with Receipt
-1. list_organizations -> get organization_id
-2. list_accounts -> find account_id values
-3. create_journal -> create the entry (balanced debits/credits)
-4. add_journal_attachment -> attach the receipt file
-
-### Record an Expense with Receipt
-1. list_organizations -> get organization_id
-2. list_accounts -> find expense account_id and payment account_id
-3. create_expense -> record the expense
-4. add_expense_receipt -> attach the receipt
-
-### Create a Bill from Vendor
-1. list_organizations -> get organization_id
-2. list_contacts with contact_type="vendor" -> find vendor_id
-3. list_accounts -> find expense account_id
-4. create_bill -> create the bill
-5. add_bill_attachment -> attach the vendor invoice
+### Organizations (rarely needed)
+- list_organizations, get_organization
 `,
   health: {
     enabled: true,

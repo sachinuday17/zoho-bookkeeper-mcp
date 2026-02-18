@@ -106,7 +106,7 @@ describe("Zoho API Client", () => {
         expect.any(String),
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining("JSONString"),
+          body: JSON.stringify({ journal_date: "2024-01-15", notes: "Test" }),
         })
       )
     })

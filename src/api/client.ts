@@ -196,8 +196,7 @@ export async function zohoRequest<T>(
   }
 
   if (body && method !== "GET" && method !== "HEAD") {
-    // Zoho expects a JSONString parameter wrapping the actual data
-    options.body = JSON.stringify({ JSONString: JSON.stringify(body) })
+    options.body = JSON.stringify(body)
   }
 
   try {

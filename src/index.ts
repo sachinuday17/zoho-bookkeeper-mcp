@@ -16,6 +16,13 @@ import { registerBillTools } from "./tools/bills.js"
 import { registerInvoiceTools } from "./tools/invoices.js"
 import { registerContactTools } from "./tools/contacts.js"
 import { registerBankAccountTools } from "./tools/bank-accounts.js"
+import { registerBankReconciliationTools } from "./tools/bank-reconciliation.js"
+import { registerInvoiceWriteTools } from "./tools/invoices-write.js"
+import { registerContactWriteTools } from "./tools/contacts-write.js"
+import { registerPaymentTools } from "./tools/payments.js"
+import { registerReportTools } from "./tools/reports.js"
+import { registerIndiaGSTTools } from "./tools/india-gst.js"
+import { registerItemTools } from "./tools/items.js"
 
 // Create the MCP server
 const server = new FastMCP({

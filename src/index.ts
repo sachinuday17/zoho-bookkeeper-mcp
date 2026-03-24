@@ -81,5 +81,12 @@ registerBillTools(server)
 registerInvoiceTools(server)
 registerContactTools(server)
 registerBankAccountTools(server)
+registerBankReconciliationTools(server)
+registerInvoiceWriteTools(server)
+registerContactWriteTools(server)
+registerPaymentTools(server)
+registerReportTools(server)
+registerIndiaGSTTools(server)
+registerItemTools(server)
 
 export default server

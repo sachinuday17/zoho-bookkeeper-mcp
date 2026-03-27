@@ -47,7 +47,7 @@ Set cash_basis=true for cash-basis accounting (default is accrual).`,
     parameters: z.object({
       organization_id: optionalOrganizationIdSchema,
       from_date: dateSchema,
-      to_date: dateSchema,
+      to_date: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, "Date must be YYYY-MM-DD"),
       cash_basis: z.boolean().optional().describe("Use cash basis (default: accrual)"),
     }),
     annotations: { title: "Profit & Loss", readOnlyHint: true, openWorldHint: true },

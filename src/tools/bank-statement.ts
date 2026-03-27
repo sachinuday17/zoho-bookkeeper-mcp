@@ -53,14 +53,15 @@ Filter by status=Uncategorized to see pending entries only.`,
       openWorldHint: true,
     },
     execute: async (args) => {
-      const queryParams: Record<string, string> = {
-        filter_by: `Status.${args.status ?? "Uncategorized"}`,
-      }
+     const queryParams: Record<string, string> = {
+  account_id: args.account_id,
+  filter_by: `Status.${args.status ?? "Uncategorized"}`,
+}
       if (args.page) queryParams.page = args.page.toString()
       if (args.per_page) queryParams.per_page = args.per_page.toString()
 
       const result = await zohoGet<{ statement: any[] }>(
-        `/bankaccounts/${args.account_id}/statement`,
+        `/banktransactions`,
         args.organization_id,
         queryParams
       )

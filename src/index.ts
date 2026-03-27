@@ -24,6 +24,7 @@ import { registerReportTools } from "./tools/reports.js"
 import { registerIndiaGSTTools } from "./tools/india-gst.js"
 import { registerItemTools } from "./tools/items.js"
 import { registerCustomerPaymentTools } from "./tools/customer-payments.js"
+import { registerBankStatementTools } from "./tools/bank-statement.js"
 
 // Create the MCP server
 const server = new FastMCP({
@@ -97,5 +98,6 @@ registerReportTools(server)
 registerIndiaGSTTools(server)
 registerItemTools(server)
 registerCustomerPaymentTools(server)
+registerBankStatementTools(server)
 
 export default server

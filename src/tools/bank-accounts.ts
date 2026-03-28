@@ -12,7 +12,7 @@ import {
   optionalOrganizationIdSchema,
 } from "../utils/validation.js"
 
-/**
+/**n
  * Register bank account tools on the server
  */
 export function registerBankAccountTools(server: FastMCP): void {
@@ -199,4 +199,48 @@ These are transactions imported/entered in Zoho, not live bank feeds.`,
       return `**Bank Transactions** (${transactions.length} transactions)\n\n${formatted}`
     },
   })
+// Categorize Bank Statement Transaction
+server.addTool({
+  name: "categorize_bank_statement_transaction",
+  description: `Categorize a bank feed transaction in Zoho Books Banking module.
+Endpoint: POST /bankaccounts/{account_id}/transactions/{transaction_id}/categorize`,
+  parameters: z.object({
+    organization_id: optionalOrganizationIdSchema.optional(),
+    account_id: entityIdSchema.describe("BANK account ID — 1145125000001109343 for Zoho Payroll Bank Account"),
+    statement_transaction_id: entityIdSchema.describe("transaction_id from list_bank_statement_transactions"),
+    gl_account_id: entityIdSchema.describe("GL account to categorize against — expense/income/asset account, NOT the bank account"),
+    transaction_type: z.enum(["expense", "deposit", "transfer_fund", "owner_contribution", "owner_drawings", "other_income", "refund"])
+      .describe("Transaction type — determines GL debit/credit direction"),
+    amount: z.number().positive(),
+    date: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/),
+    description: z.string().max(500).optional(),
+    reference_number: z.string().max(100).optional(),
+    vendor_id: z.string().optional(),
+    customer_id: z.string().optional(),
+  }),
+  execute: async (args) => {
+    const { zohoPost } = await import("../api/client.js")
+    const body: Record<string, unknown> = {
+      transaction_type: args.transaction_type,
+      amount: args.amount,
+      date: args.date,
+      account_id: args.gl_account_id,
+    }
+    if (args.description) body.description = args.description
+    if (args.reference_number) body.reference_number = args.reference_number
+    if (args.vendor_id) body.vendor_id = args.vendor_id
+    if (args.customer_id) body.customer_id = args.customer_id
+
+    const result = await zohoPost(
+      `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
+      args.organization_id,
+      body
+    )
+
+    if (!result.ok) {
+      return result.errorMessage || "Categorization failed"
+    }
+    return `✅ Transaction ${args.statement_transaction_id} categorized successfully.`
+  },
+})
 }

@@ -1,6 +1,6 @@
 /**
  * Bank Statement Categorization Tools — Zoho Books India
- * Endpoint verified: /bankaccounts/{account_id}/transactions/{id}/categorize
+ * Endpoint verified: /bankaccounts/{account_id}/statement/{id}/categorize
  */
 
 import { z } from "zod"
@@ -31,17 +31,20 @@ Use to get transaction_id values for categorize_bank_statement_transaction.`,
     }),
     annotations: { title: "List Bank Statement Feed Transactions", readOnlyHint: true, openWorldHint: true },
     execute: async (args) => {
+      // FIX: account_id goes in URL path, not query string
       const queryParams: Record<string, string> = {
-        account_id: args.account_id,
         status: (args.status ?? "Uncategorized").toLowerCase(),
       }
       if (args.page) queryParams.page = args.page.toString()
       if (args.per_page) queryParams.per_page = args.per_page.toString()
 
-const result = await zohoGet<{ banktransactions: any[] }>(
-  `/bankaccounts/${args.account_id}/statement`, args.organization_id, queryParams
-)
-const entries = result.data?.banktransactions || []
+      // FIX: correct endpoint — /bankaccounts/{id}/statement, not /banktransactions
+      const result = await zohoGet<{ banktransactions: any[] }>(
+        `/bankaccounts/${args.account_id}/statement`, args.organization_id, queryParams
+      )
+      if (!result.ok) return result.errorMessage || "Failed to list bank statement transactions"
+
+      const entries = result.data?.banktransactions || []
       if (entries.length === 0) return `No ${args.status ?? "Uncategorized"} transactions found.`
 
       const formatted = entries.map((e: any, i: number) => {
@@ -65,7 +68,7 @@ const entries = result.data?.banktransactions || []
 Performs the same action as the Categorize button in Banking UI.
 Does NOT create a duplicate — links existing feed entry to a GL account.
 
-Endpoint: POST /bankaccounts/{account_id}/transactions/{transaction_id}/categorize
+Endpoint: POST /bankaccounts/{account_id}/statement/{transaction_id}/categorize
 
 REQUIRED PARAMETERS:
 - account_id: the BANK account ID (1145125000001109343)
@@ -117,9 +120,9 @@ REQUIRED PARAMETERS:
       if (args.vendor_id) payload.vendor_id = args.vendor_id
       if (args.customer_id) payload.customer_id = args.customer_id
 
-      // Correct Zoho Books v3 India endpoint
+      // FIX: correct Zoho Books v3 India endpoint — /statement/ not /transactions/
       const result = await zohoPost<{ message: string }>(
-        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
+        `/bankaccounts/${args.account_id}/statement/${args.statement_transaction_id}/categorize`,
         args.organization_id,
         payload
       )
@@ -166,8 +169,9 @@ transaction_type: bill | invoice | vendor_payment | customer_payment`,
     }),
     annotations: { title: "Match Bank Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
+      // FIX: correct endpoint — /statement/ not /transactions/
       const result = await zohoPost<{ message: string }>(
-        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/match`,
+        `/bankaccounts/${args.account_id}/statement/${args.statement_transaction_id}/match`,
         args.organization_id,
         { transaction_id: args.zoho_transaction_id, transaction_type: args.transaction_type }
       )
@@ -194,8 +198,9 @@ reason: duplicate | own_account_transfer | non_business | other`,
     }),
     annotations: { title: "Exclude Bank Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
+      // FIX: correct endpoint — /statement/ not /transactions/
       const result = await zohoPost<{ message: string }>(
-        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/exclude`,
+        `/bankaccounts/${args.account_id}/statement/${args.statement_transaction_id}/exclude`,
         args.organization_id,
         { reason: args.reason }
       )

@@ -18,6 +18,7 @@ import {
  * Register expense tools on the server
  */
 export function registerExpenseTools(server: FastMCP): void {
+
   // List Expenses
   server.addTool({
     name: "list_expenses",
@@ -202,7 +203,7 @@ Use this expense_id to add receipts.`
     },
   })
 
-  // Add Expense Receipt (Attachment)
+  // Add Expense Receipt
   server.addTool({
     name: "add_expense_receipt",
     description: `Upload a receipt attachment to an expense.
@@ -311,4 +312,33 @@ Removes the file association from the expense.`,
 Receipt removed from expense \`${args.expense_id}\`.`
     },
   })
+
+  // Delete Expense
+  server.addTool({
+    name: "delete_expense",
+    description: `Delete an expense record from Zoho Books — IRREVERSIBLE.
+Only non-reimbursed expenses can be deleted.
+Confirm expense_id before proceeding — this cannot be undone.`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      expense_id: z.string().min(1).describe("Expense ID to delete"),
+    }),
+    annotations: {
+      title: "Delete Expense",
+      readOnlyHint: false,
+      openWorldHint: true,
+    },
+    execute: async (args) => {
+      const result = await zohoPost<{ message: string }>(
+        `/expenses/${args.expense_id}/delete`,
+        args.organization_id,
+        {}
+      )
+      if (!result.ok) return result.errorMessage || "Failed to delete expense"
+      return `✅ Expense \`${args.expense_id}\` deleted successfully.`
+    },
+  })
+
 }

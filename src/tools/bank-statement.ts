@@ -84,7 +84,7 @@ transaction_type: expense, deposit, transfer_fund, owner_drawings, owner_contrib
       if (args.customer_id) payload.customer_id = args.customer_id
 
       const result = await zohoPost<{ message: string }>(
-        `/banking/transactions/${args.statement_transaction_id}/categorize`,
+        `/banking/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
         args.organization_id,
         payload
       )
@@ -114,7 +114,7 @@ transaction_type: bill, invoice, vendor_payment, customer_payment`,
     annotations: { title: "Match Bank Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
       const result = await zohoPost<{ message: string }>(
-        `/banking/transactions/${args.statement_transaction_id}/match`,
+        `/banking/${args.account_id}/transactions/${args.statement_transaction_id}/match`,
         args.organization_id,
         { transaction_id: args.zoho_transaction_id, transaction_type: args.transaction_type }
       )
@@ -136,7 +136,7 @@ Excluded entries are hidden but NOT deleted — recoverable from Zoho UI.`,
     annotations: { title: "Exclude Bank Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
       const result = await zohoPost<{ message: string }>(
-        `/banking/transactions/${args.statement_transaction_id}/exclude`,
+        `/banking/${args.account_id}/transactions/${args.statement_transaction_id}/exclude`,
         args.organization_id,
         { reason: args.reason }
       )

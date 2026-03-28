@@ -10,43 +10,26 @@ import { getMimeType, validateAttachment } from "../utils/mime-types.js"
 import { parseZohoResponse, type ParsedResponse } from "../utils/response-parser.js"
 
 // Security: Allowed base directories for file uploads
-// Files can only be uploaded from these directories or their subdirectories
 const ALLOWED_UPLOAD_DIRECTORIES = [
-  "/app/documents", // Docker container path
-  "/tmp/zoho-bookkeeper-uploads", // App-specific temp directory (narrower than /tmp)
-  process.env.HOME ? path.join(process.env.HOME, "Documents") : undefined, // User documents
-  process.env.ZOHO_ALLOWED_UPLOAD_DIR, // Optional override/additional safe directory
+  "/app/documents",
+  "/tmp/zoho-bookkeeper-uploads",
+  process.env.HOME ? path.join(process.env.HOME, "Documents") : undefined,
+  process.env.ZOHO_ALLOWED_UPLOAD_DIR,
 ].filter((d): d is string => Boolean(d))
 
-/**
- * Normalize path for cross-platform comparison
- * Security: Handles case-insensitive filesystems (Windows, macOS with default settings)
- */
 function normalizeForCompare(p: string): string {
   const normalized = path.normalize(p)
-  // Windows and macOS (default) have case-insensitive filesystems
   return process.platform === "win32" || process.platform === "darwin"
     ? normalized.toLowerCase()
     : normalized
 }
 
-/**
- * Sanitize filename for multipart upload
- * Security: Prevents header injection via CR/LF and path traversal via separators
- */
 function sanitizeFilename(filename: string): string {
   return filename
-    .replace(/[\r\n]/g, "") // Strip CR/LF to prevent header injection
-    .replace(/[/\\]/g, "_") // Replace path separators to prevent traversal
+    .replace(/[\r\n]/g, "")
+    .replace(/[/\\]/g, "_")
 }
 
-/**
- * Validate that a file path is within allowed directories (prevent path traversal)
- * Security: Prevents reading arbitrary files like /etc/passwd
- * Security: Uses realpath to resolve symlinks and prevent symlink-based attacks
- * Security: Returns resolvedPath to prevent TOCTOU attacks
- * Security: Uses normalized paths for case-insensitive filesystem comparison
- */
 function validateFilePath(filePath: string): {
   valid: boolean
   error?: string
@@ -54,7 +37,6 @@ function validateFilePath(filePath: string): {
 } {
   const resolvedInput = path.resolve(filePath)
 
-  // Prefer canonical path when file exists (symlink protection), otherwise use resolved path
   let realPath = resolvedInput
   try {
     if (fs.existsSync(filePath)) {
@@ -64,13 +46,11 @@ function validateFilePath(filePath: string): {
     realPath = resolvedInput
   }
 
-  // Check if real path is within allowed directories (using normalized comparison)
   const normalizedRealPath = normalizeForCompare(realPath)
 
   const isAllowed = ALLOWED_UPLOAD_DIRECTORIES.some((allowedDir) => {
     const resolvedAllowed = path.resolve(allowedDir)
 
-    // Prefer canonical path for allowed dir, fall back to resolved if it doesn't exist
     let allowedReal = resolvedAllowed
     try {
       if (fs.existsSync(allowedDir)) {
@@ -97,10 +77,6 @@ function validateFilePath(filePath: string): {
   return { valid: true, resolvedPath: realPath }
 }
 
-/**
- * Create an AbortController with timeout
- * Security: Prevents hanging requests
- */
 function createTimeoutController(timeoutMs: number = REQUEST_TIMEOUT_MS): {
   controller: AbortController
   timeoutId: ReturnType<typeof setTimeout>
@@ -109,7 +85,6 @@ function createTimeoutController(timeoutMs: number = REQUEST_TIMEOUT_MS): {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
-  // Prevent the timeout from keeping the process alive (useful for tests/CLI)
   if (typeof timeoutId === "object" && "unref" in timeoutId) {
     timeoutId.unref()
   }
@@ -117,10 +92,6 @@ function createTimeoutController(timeoutMs: number = REQUEST_TIMEOUT_MS): {
   return { controller, timeoutId, timeoutMs }
 }
 
-/**
- * Resolve organization ID from parameter or environment config
- * Returns the resolved org ID or an error message if neither is available
- */
 function resolveOrganizationId(organizationId?: string): { orgId: string } | { error: string } {
   const config = getZohoConfig()
   const orgId = organizationId || config.organizationId
@@ -147,7 +118,6 @@ export async function zohoRequest<T>(
 ): Promise<ParsedResponse<T>> {
   const config = getZohoConfig()
 
-  // Resolve organization ID
   const orgIdResult = resolveOrganizationId(organizationId)
   if ("error" in orgIdResult) {
     return {
@@ -183,7 +153,13 @@ export async function zohoRequest<T>(
     })
   }
 
-  // Security: Add request timeout
+  // ── DEBUG LOGGING — remove after endpoint is confirmed ──────────────────
+  console.log(`[ZOHO ${method}] URL: ${url.toString()}`)
+  if (body) {
+    console.log(`[ZOHO ${method}] Body: ${JSON.stringify(body)}`)
+  }
+  // ────────────────────────────────────────────────────────────────────────
+
   const { controller, timeoutId, timeoutMs } = createTimeoutController()
 
   const options: RequestInit = {
@@ -201,6 +177,11 @@ export async function zohoRequest<T>(
 
   try {
     const response = await fetch(url.toString(), options)
+
+    // ── DEBUG: log raw response status ───────────────────────────────────
+    console.log(`[ZOHO ${method}] Response status: ${response.status}`)
+    // ────────────────────────────────────────────────────────────────────
+
     return parseZohoResponse<T>(response, endpoint)
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -263,7 +244,6 @@ export async function zohoDelete<T>(
 
 /**
  * Upload a file attachment to a Zoho Books entity
- * Uses multipart/form-data for proper file upload
  */
 export async function zohoUploadAttachment(
   endpoint: string,
@@ -272,7 +252,6 @@ export async function zohoUploadAttachment(
 ): Promise<ParsedResponse<Record<string, unknown>>> {
   const config = getZohoConfig()
 
-  // Resolve organization ID
   const orgIdResult = resolveOrganizationId(organizationId)
   if ("error" in orgIdResult) {
     return {
@@ -283,7 +262,6 @@ export async function zohoUploadAttachment(
 
   let token: string
 
-  // Security: Validate file path is within allowed directories (prevent path traversal)
   const pathValidation = validateFilePath(filePath)
   if (!pathValidation.valid || !pathValidation.resolvedPath) {
     return {
@@ -292,10 +270,8 @@ export async function zohoUploadAttachment(
     }
   }
 
-  // Security: Use resolved path for all subsequent operations to prevent TOCTOU attacks
   const resolvedPath = pathValidation.resolvedPath
 
-  // Validate the attachment file type using resolved path (ensures checks match the file being uploaded)
   const validation = validateAttachment(resolvedPath)
   if (!validation.valid) {
     return {
@@ -304,14 +280,12 @@ export async function zohoUploadAttachment(
     }
   }
 
-  // Security: Open file once and validate/read via same handle (prevents TOCTOU + avoids blocking I/O)
   let fileBuffer: Buffer
   let fileName: string
   let mimeType: string
 
   let fh: fs.promises.FileHandle | undefined
   try {
-    // Security: Use O_NOFOLLOW to prevent symlink-based path traversal attacks
     const flags =
       typeof fs.constants.O_NOFOLLOW === "number"
         ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
@@ -320,7 +294,6 @@ export async function zohoUploadAttachment(
     fh = await fs.promises.open(resolvedPath, flags)
     const stats = await fh.stat()
 
-    // Security: Ensure it's a regular file (rejects directories, FIFOs, sockets, devices)
     if (!stats.isFile()) {
       return {
         ok: false,
@@ -328,7 +301,6 @@ export async function zohoUploadAttachment(
       }
     }
 
-    // Security: Validate file size (prevent OOM)
     if (stats.size > MAX_FILE_SIZE_BYTES) {
       return {
         ok: false,
@@ -337,7 +309,6 @@ export async function zohoUploadAttachment(
     }
 
     fileBuffer = await fh.readFile()
-    // Security: Sanitize filename to prevent header injection and path traversal
     fileName = sanitizeFilename(path.basename(resolvedPath))
     mimeType = getMimeType(resolvedPath)
   } catch (e) {
@@ -371,7 +342,6 @@ export async function zohoUploadAttachment(
     }
   }
 
-  // Build URL
   const url = new URL(`${config.apiUrl}${endpoint}`)
   url.searchParams.set("organization_id", orgIdResult.orgId)
 
@@ -379,7 +349,6 @@ export async function zohoUploadAttachment(
   const blob = new Blob([fileBuffer], { type: mimeType })
   formData.append("attachment", blob, fileName)
 
-  // Security: Add request timeout
   const { controller, timeoutId, timeoutMs } = createTimeoutController()
 
   try {
@@ -387,7 +356,6 @@ export async function zohoUploadAttachment(
       method: "POST",
       headers: {
         Authorization: `Zoho-oauthtoken ${token}`,
-        // DO NOT set Content-Type header - let fetch set it with the correct multipart boundary
       },
       body: formData,
       signal: controller.signal,
@@ -452,7 +420,6 @@ export async function zohoListOrganizations(): Promise<ParsedResponse<Record<str
     }
   }
 
-  // Security: Add request timeout
   const { controller, timeoutId, timeoutMs } = createTimeoutController()
 
   try {

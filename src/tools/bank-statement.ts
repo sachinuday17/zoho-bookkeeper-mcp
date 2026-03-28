@@ -121,7 +121,7 @@ REQUIRED PARAMETERS:
 
       // Correct Zoho Books v3 India endpoint
       const result = await zohoPost<{ message: string }>(
-        `/bankaccounts/${args.account_id}/statement/${args.statement_transaction_id}/categorize`,
+        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
         args.organization_id,
         payload
       )
@@ -169,7 +169,7 @@ transaction_type: bill | invoice | vendor_payment | customer_payment`,
     annotations: { title: "Match Bank Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
       const result = await zohoPost<{ message: string }>(
-        `/bankaccounts/${args.account_id}/statement/${args.statement_transaction_id}/match`,
+        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/match`,
         args.organization_id,
         { transaction_id: args.zoho_transaction_id, transaction_type: args.transaction_type }
       )
@@ -197,7 +197,7 @@ reason: duplicate | own_account_transfer | non_business | other`,
     annotations: { title: "Exclude Bank Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
       const result = await zohoPost<{ message: string }>(
-        `/bankaccounts/${args.account_id}/statement/${args.statement_transaction_id}/exclude`,
+        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/exclude`,
         args.organization_id,
         { reason: args.reason }
       )

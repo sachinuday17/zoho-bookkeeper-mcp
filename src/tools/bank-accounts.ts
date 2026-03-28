@@ -4,7 +4,7 @@
 
 import { z } from "zod"
 import type { FastMCP } from "fastmcp"
-import { zohoGet } from "../api/client.js"
+import { zohoGet, zohoPost } from "../api/client.js"
 import type { BankAccount, BankTransaction } from "../api/types.js"
 import {
   entityIdSchema,
@@ -12,7 +12,7 @@ import {
   optionalOrganizationIdSchema,
 } from "../utils/validation.js"
 
-/**n
+/**
  * Register bank account tools on the server
  */
 export function registerBankAccountTools(server: FastMCP): void {
@@ -62,7 +62,6 @@ These are the accounts linked in Zoho Books, not live bank data.`,
         .map((acc, index) => {
           const balance =
             acc.balance !== undefined ? ` | Balance: ${acc.currency_code || ""} ${acc.balance}` : ""
-          // Security: Sanitize account number (remove non-digits) before masking
           const digitsOnly = acc.account_number?.replace(/\D/g, "")
           const maskedAccount =
             digitsOnly && digitsOnly.length >= 4 ? `****${digitsOnly.slice(-4)}` : "N/A"
@@ -110,7 +109,6 @@ Returns full bank account details including routing number and balance.`,
         return "Bank account not found"
       }
 
-      // Security: Sanitize account/routing numbers (remove non-digits) before masking
       const accountDigits = account.account_number?.replace(/\D/g, "")
       const maskedAccount =
         accountDigits && accountDigits.length >= 4 ? `****${accountDigits.slice(-4)}` : "N/A"
@@ -199,48 +197,192 @@ These are transactions imported/entered in Zoho, not live bank feeds.`,
       return `**Bank Transactions** (${transactions.length} transactions)\n\n${formatted}`
     },
   })
-// Categorize Bank Statement Transaction
-server.addTool({
-  name: "categorize_bank_statement_transaction",
-  description: `Categorize a bank feed transaction in Zoho Books Banking module.
-Endpoint: POST /bankaccounts/{account_id}/transactions/{transaction_id}/categorize`,
-  parameters: z.object({
-    organization_id: optionalOrganizationIdSchema.optional(),
-    account_id: entityIdSchema.describe("BANK account ID — 1145125000001109343 for Zoho Payroll Bank Account"),
-    statement_transaction_id: entityIdSchema.describe("transaction_id from list_bank_statement_transactions"),
-    gl_account_id: entityIdSchema.describe("GL account to categorize against — expense/income/asset account, NOT the bank account"),
-    transaction_type: z.enum(["expense", "deposit", "transfer_fund", "owner_contribution", "owner_drawings", "other_income", "refund"])
-      .describe("Transaction type — determines GL debit/credit direction"),
-    amount: z.number().positive(),
-    date: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/),
-    description: z.string().max(500).optional(),
-    reference_number: z.string().max(100).optional(),
-    vendor_id: z.string().optional(),
-    customer_id: z.string().optional(),
-  }),
-  execute: async (args) => {
-    const { zohoPost } = await import("../api/client.js")
-    const body: Record<string, unknown> = {
-      transaction_type: args.transaction_type,
-      amount: args.amount,
-      date: args.date,
-      account_id: args.gl_account_id,
-    }
-    if (args.description) body.description = args.description
-    if (args.reference_number) body.reference_number = args.reference_number
-    if (args.vendor_id) body.vendor_id = args.vendor_id
-    if (args.customer_id) body.customer_id = args.customer_id
 
-    const result = await zohoPost(
-      `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
-      args.organization_id,
-      body
-    )
+  // List Bank Statement Transactions (feed)
+  server.addTool({
+    name: "list_bank_statement_transactions",
+    description: `List bank statement feed transactions from Zoho Books Banking module.
+Returns uncategorized entries visible in Banking UI.
+Use to get transaction_id values for categorize_bank_statement_transaction.`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      account_id: entityIdSchema.describe(
+        "Bank account ID — e.g. 1145125000001109343 for Zoho Payroll Bank Account"
+      ),
+      status: z
+        .enum(["All", "Uncategorized", "Categorized"])
+        .optional()
+        .default("Uncategorized"),
+      page: z.number().int().positive().optional(),
+      per_page: z.number().int().min(1).max(200).optional(),
+    }),
+    annotations: {
+      title: "List Bank Statement Transactions",
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    execute: async (args) => {
+      const queryParams: Record<string, string> = {}
+      if (args.status) queryParams.status = args.status
+      if (args.page) queryParams.page = args.page.toString()
+      if (args.per_page) queryParams.per_page = args.per_page.toString()
 
-    if (!result.ok) {
-      return result.errorMessage || "Categorization failed"
-    }
-    return `✅ Transaction ${args.statement_transaction_id} categorized successfully.`
-  },
-})
+      const result = await zohoGet<{ statement_transactions: unknown[] }>(
+        `/bankaccounts/${args.account_id}/statement`,
+        args.organization_id,
+        queryParams
+      )
+
+      if (!result.ok) {
+        return result.errorMessage || "Failed to list bank statement transactions"
+      }
+
+      const transactions = result.data?.statement_transactions || []
+
+      if (transactions.length === 0) {
+        return "No statement transactions found."
+      }
+
+      return `**Bank Feed Transactions** (${transactions.length} entries)\n\n${JSON.stringify(transactions, null, 2)}`
+    },
+  })
+
+  // Categorize Bank Statement Transaction
+  server.addTool({
+    name: "categorize_bank_statement_transaction",
+    description: `Categorize a bank feed transaction in Zoho Books Banking module.
+Performs the same action as the Categorize button in Banking UI.
+Does NOT create a duplicate — links existing feed entry to a GL account.
+
+Endpoint: POST /bankaccounts/{account_id}/transactions/{transaction_id}/categorize
+
+REQUIRED PARAMETERS:
+- account_id: the BANK account ID (1145125000001109343)
+- statement_transaction_id: transaction_id from list_bank_statement_transactions
+- gl_account_id: the GL/expense/income account to post to
+- transaction_type: expense | deposit | transfer_fund | owner_drawings | owner_contribution | other_income | refund`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.optional(),
+      account_id: entityIdSchema.describe(
+        "BANK account ID — 1145125000001109343 for Zoho Payroll Bank Account"
+      ),
+      statement_transaction_id: entityIdSchema.describe(
+        "transaction_id from list_bank_statement_transactions"
+      ),
+      gl_account_id: entityIdSchema.describe(
+        "GL account to categorize against — expense/income/asset account, NOT the bank account"
+      ),
+      transaction_type: z
+        .enum([
+          "expense",
+          "deposit",
+          "transfer_fund",
+          "owner_contribution",
+          "owner_drawings",
+          "other_income",
+          "refund",
+        ])
+        .describe("Transaction type — determines GL debit/credit direction"),
+      amount: z.number().positive(),
+      date: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/),
+      description: z.string().max(500).optional(),
+      reference_number: z.string().max(100).optional(),
+      vendor_id: z.string().optional(),
+      customer_id: z.string().optional(),
+    }),
+    execute: async (args) => {
+      const body: Record<string, unknown> = {
+        transaction_type: args.transaction_type,
+        amount: args.amount,
+        date: args.date,
+        account_id: args.gl_account_id,
+      }
+      if (args.description) body.description = args.description
+      if (args.reference_number) body.reference_number = args.reference_number
+      if (args.vendor_id) body.vendor_id = args.vendor_id
+      if (args.customer_id) body.customer_id = args.customer_id
+
+      const result = await zohoPost(
+        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
+        args.organization_id,
+        body
+      )
+
+      if (!result.ok) {
+        return result.errorMessage || "Categorization failed"
+      }
+      return `✅ Transaction ${args.statement_transaction_id} categorized successfully.`
+    },
+  })
+
+  // Match Bank Transaction
+  server.addTool({
+    name: "match_bank_transaction",
+    description: `Match a bank feed transaction to an existing bill, invoice, or payment.
+Links the bank entry to an existing accounting record — no duplicate created.
+transaction_type: bill | invoice | vendor_payment | customer_payment`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      account_id: entityIdSchema.describe("Bank account ID"),
+      statement_transaction_id: entityIdSchema.describe("Bank feed transaction ID"),
+      transaction_type: z.enum(["bill", "invoice", "vendor_payment", "customer_payment"]),
+      zoho_transaction_id: entityIdSchema.describe(
+        "ID of existing bill/invoice/payment to match"
+      ),
+    }),
+    execute: async (args) => {
+      const body: Record<string, unknown> = {
+        transaction_type: args.transaction_type,
+        transaction_id: args.zoho_transaction_id,
+      }
+
+      const result = await zohoPost(
+        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/match`,
+        args.organization_id,
+        body
+      )
+
+      if (!result.ok) {
+        return result.errorMessage || "Match failed"
+      }
+      return `✅ Transaction ${args.statement_transaction_id} matched successfully.`
+    },
+  })
+
+  // Exclude Bank Transaction
+  server.addTool({
+    name: "exclude_bank_transaction",
+    description: `Exclude a bank feed transaction from reconciliation.
+Use for duplicates, inter-account transfers, or non-business entries.
+Excluded entries are hidden but recoverable from Zoho UI.
+reason: duplicate | own_account_transfer | non_business | other`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.describe(
+        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+      ),
+      account_id: entityIdSchema.describe("Bank account ID"),
+      statement_transaction_id: entityIdSchema.describe("Bank feed transaction ID to exclude"),
+      reason: z.enum(["duplicate", "own_account_transfer", "non_business", "other"]),
+    }),
+    execute: async (args) => {
+      const body: Record<string, unknown> = {
+        reason: args.reason,
+      }
+
+      const result = await zohoPost(
+        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/exclude`,
+        args.organization_id,
+        body
+      )
+
+      if (!result.ok) {
+        return result.errorMessage || "Exclude failed"
+      }
+      return `✅ Transaction ${args.statement_transaction_id} excluded successfully.`
+    },
+  })
 }

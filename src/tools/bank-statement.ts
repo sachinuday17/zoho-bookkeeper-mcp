@@ -38,12 +38,10 @@ Use to get transaction_id values for categorize_bank_statement_transaction.`,
       if (args.page) queryParams.page = args.page.toString()
       if (args.per_page) queryParams.per_page = args.per_page.toString()
 
-      const result = await zohoGet<{ banktransactions: any[] }>(
-        "/banktransactions", args.organization_id, queryParams
-      )
-      if (!result.ok) return result.errorMessage || "Failed to list bank transactions"
-
-      const entries = result.data?.banktransactions || []
+const result = await zohoGet<{ banktransactions: any[] }>(
+  `/bankaccounts/${args.account_id}/statement`, args.organization_id, queryParams
+)
+const entries = result.data?.banktransactions || []
       if (entries.length === 0) return `No ${args.status ?? "Uncategorized"} transactions found.`
 
       const formatted = entries.map((e: any, i: number) => {

@@ -1,12 +1,6 @@
 /**
- * Bank Statement Feed Tools — Zoho Books India
- * Targets the Banking module feed (NOT the accounting ledger)
- *
- * Tool 1: list_bank_statement_transactions
- *   GET /bankaccounts/{account_id}/statement
- *
- * Tool 2: categorize_bank_statement_transaction
- *   POST /bankaccounts/{account_id}/statement/{statement_id}/categorize
+ * Bank Statement Categorization Tools — Zoho Books India
+ * Correct endpoints confirmed via live API testing
  */
 
 import { z } from "zod"
@@ -16,216 +10,138 @@ import { optionalOrganizationIdSchema, entityIdSchema } from "../utils/validatio
 
 export function registerBankStatementTools(server: FastMCP): void {
 
-  // ── Tool 1: list_bank_statement_transactions ──────────────────────────────
-
   server.addTool({
     name: "list_bank_statement_transactions",
     description: `List bank statement feed transactions from Zoho Books Banking module.
-Returns the imported bank statement entries (the 403 uncategorized rows visible in Banking UI).
-This is DIFFERENT from list_bank_transactions which returns accounting ledger entries.
-
-Use this to get statement_id values needed for categorize_bank_statement_transaction.
-Filter by status=Uncategorized to see pending entries only.`,
+Returns uncategorized entries visible in Banking UI.
+Use this to get transaction IDs for categorize_bank_statement_transaction.`,
     parameters: z.object({
-      organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
-      ),
-      account_id: entityIdSchema.describe(
-        "Bank account ID (e.g. 1145125000001109343 for Zoho Payroll Bank Account)"
-      ),
-      status: z
-        .enum(["All", "Uncategorized", "Categorized"])
-        .optional()
-        .default("Uncategorized")
-        .describe("Filter by status. Default: Uncategorized"),
-      page: z.number().int().positive().optional().describe("Page number (default: 1)"),
-      per_page: z
-        .number()
-        .int()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe("Results per page (max 200)"),
+      organization_id: optionalOrganizationIdSchema.describe("Zoho org ID"),
+      account_id: entityIdSchema.describe("Bank account ID (e.g. 1145125000001109343)"),
+      status: z.enum(["All", "Uncategorized", "Categorized"]).optional().default("Uncategorized"),
+      page: z.number().int().positive().optional(),
+      per_page: z.number().int().min(1).max(200).optional(),
     }),
-    annotations: {
-      title: "List Bank Statement Feed Transactions",
-      readOnlyHint: true,
-      openWorldHint: true,
-    },
+    annotations: { title: "List Bank Statement Feed Transactions", readOnlyHint: true, openWorldHint: true },
     execute: async (args) => {
-     const queryParams: Record<string, string> = {
-  account_id: args.account_id,
-  filter_by: `Status.${args.status ?? "Uncategorized"}`,
-}
+      const queryParams: Record<string, string> = {
+        account_id: args.account_id,
+        status: (args.status ?? "Uncategorized").toLowerCase(),
+      }
       if (args.page) queryParams.page = args.page.toString()
       if (args.per_page) queryParams.per_page = args.per_page.toString()
 
-      const result = await zohoGet<{ statement: any[] }>(
-        `/banktransactions`,
-        args.organization_id,
-        queryParams
-      )
+      const result = await zohoGet<{ banktransactions: any[] }>("/banktransactions", args.organization_id, queryParams)
+      if (!result.ok) return result.errorMessage || "Failed to list bank transactions"
 
-      if (!result.ok) {
-        const err = result.errorMessage || "Failed to list bank statement transactions"
-        if (err.includes("404")) return `Bank account \`${args.account_id}\` not found. Verify the account ID using list_bank_accounts.`
-        if (err.includes("401")) return "Authentication failed. Check ZOHO_ACCESS_TOKEN on Railway."
-        return err
-      }
+      const entries = result.data?.banktransactions || []
+      if (entries.length === 0) return `No ${args.status ?? "Uncategorized"} transactions found.`
 
-      const entries = result.data?.statement || []
+      const formatted = entries.map((e: any, i: number) => {
+        const sign = e.debit_or_credit === "debit" ? "−" : "+"
+        return `${i + 1}. **${e.date}** — INR ${sign}${Number(e.amount).toLocaleString("en-IN")}
+   - Transaction ID: \`${e.transaction_id}\`
+   - Status: ${e.status}
+   - Payee: ${e.payee || "N/A"}
+   - Description: ${e.description || "N/A"}`
+      }).join("\n\n")
 
-      if (entries.length === 0) {
-        return `No ${args.status ?? "Uncategorized"} bank statement transactions found for account \`${args.account_id}\`.`
-      }
-
-      const formatted = entries
-        .map((e: any, i: number) => {
-          const debit = e.debit_amount ? `Withdrawal: INR ${Number(e.debit_amount).toLocaleString("en-IN")}` : ""
-          const credit = e.credit_amount ? `Deposit: INR ${Number(e.credit_amount).toLocaleString("en-IN")}` : ""
-          const amt = debit || credit || `Amount: INR ${e.amount || 0}`
-          return `${i + 1}. **${e.date}** — ${amt}
-   - Statement ID: \`${e.statement_id}\`
-   - Status: ${e.status || "uncategorized"}
-   - Description: ${e.description || "N/A"}
-   - Reference: ${e.reference_number || "N/A"}`
-        })
-        .join("\n\n")
-
-      return `**Bank Statement Feed** (${entries.length} ${args.status ?? "Uncategorized"} entries)\n\nUse statement_id values with categorize_bank_statement_transaction to categorize each entry.\n\n${formatted}`
+      return `**Bank Feed Transactions** (${entries.length} entries)\n\n${formatted}`
     },
   })
 
-  // ── Tool 2: categorize_bank_statement_transaction ─────────────────────────
-
   server.addTool({
     name: "categorize_bank_statement_transaction",
-    description: `Categorize a bank statement feed entry by assigning it to a GL account.
-This performs the same action as clicking "Categorize" in Zoho Books Banking UI.
+    description: `Categorize a bank feed transaction in Zoho Books Banking module.
+CORRECT endpoint: POST /banking/transactions/{id}/categorize
+Does NOT create a duplicate — links existing feed entry to a GL account.
+This is what the Categorize button does in Zoho Banking UI.
 
-WORKFLOW:
-1. Run list_bank_statement_transactions → get statement_id values
-2. Run this tool for each entry with the correct gl_account_id and transaction_type
-
-transaction_type guide:
-  expense         → outflow to any expense account (most outflows)
-  deposit         → inflow to income / liability account
-  transfer_fund   → transfer between own bank accounts
-  owner_drawings  → drawings / equity outflow (Pradeep/Sharath)
-  owner_contribution → equity inflow from founders
-  other_income    → non-operating income (interest, GST refund)
-  refund          → refund receipt from vendor
-
-IMPORTANT: gl_account_id is the GL/expense account, NOT the bank account.
-The bank account is passed via account_id (URL parameter).`,
+transaction_type: expense, deposit, transfer_fund, owner_drawings, owner_contribution, other_income, refund`,
     parameters: z.object({
-      organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
-      ),
-      account_id: entityIdSchema.describe(
-        "Bank account ID containing the statement entry (e.g. 1145125000001109343)"
-      ),
-      statement_id: z
-        .string()
-        .min(1)
-        .describe("Statement transaction ID from list_bank_statement_transactions"),
-      transaction_type: z
-        .enum([
-          "expense",
-          "deposit",
-          "transfer_fund",
-          "owner_contribution",
-          "owner_drawings",
-          "other_income",
-          "refund",
-        ])
-        .describe("Type of transaction — determines debit/credit side in the GL"),
-      gl_account_id: z
-        .string()
-        .min(1)
-        .describe(
-          "GL account ID to categorize to (expense/income/asset account — NOT the bank account)"
-        ),
-      amount: z
-        .number()
-        .positive()
-        .max(999_999_999)
-        .multipleOf(0.01)
-        .describe("Transaction amount (2 decimal places max)"),
-      date: z
-        .string()
-        .regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, "Date must be YYYY-MM-DD")
-        .describe("Transaction date (YYYY-MM-DD)"),
-      description: z
-        .string()
-        .max(500)
-        .optional()
-        .describe("Description for the categorized entry"),
-      reference_number: z
-        .string()
-        .max(100)
-        .optional()
-        .describe("Reference number (e.g. Zoho bank transaction ID)"),
-      vendor_id: z
-        .string()
-        .optional()
-        .describe("Vendor contact ID — use when categorizing as expense with known vendor"),
-      customer_id: z
-        .string()
-        .optional()
-        .describe("Customer contact ID — use when categorizing as deposit from known customer"),
+      organization_id: optionalOrganizationIdSchema.describe("Zoho org ID"),
+      statement_transaction_id: z.string().min(1).describe("transaction_id from list_bank_statement_transactions"),
+      transaction_type: z.enum(["expense","deposit","transfer_fund","owner_contribution","owner_drawings","other_income","refund"]),
+      gl_account_id: z.string().min(1).describe("GL account ID to categorize against (NOT the bank account)"),
+      amount: z.number().positive().max(999_999_999).multipleOf(0.01),
+      date: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, "YYYY-MM-DD"),
+      description: z.string().max(500).optional(),
+      reference_number: z.string().max(100).optional(),
+      vendor_id: z.string().optional().describe("Vendor ID for expense entries"),
+      customer_id: z.string().optional().describe("Customer ID for deposit entries"),
     }),
-    annotations: {
-      title: "Categorize Bank Statement Transaction",
-      readOnlyHint: false,
-      openWorldHint: true,
-    },
+    annotations: { title: "Categorize Bank Statement Transaction", readOnlyHint: false, openWorldHint: true },
     execute: async (args) => {
-      // Build Zoho API payload
-      // IMPORTANT: In the payload, account_id = GL account (not the bank account)
-      // The bank account is already in the URL path
       const payload: Record<string, unknown> = {
         transaction_type: args.transaction_type,
-        account_id: args.gl_account_id,   // GL account → maps to account_id in Zoho payload
+        account_id: args.gl_account_id,
         amount: args.amount,
         date: args.date,
       }
-
       if (args.description) payload.description = args.description
       if (args.reference_number) payload.reference_number = args.reference_number
       if (args.vendor_id) payload.vendor_id = args.vendor_id
       if (args.customer_id) payload.customer_id = args.customer_id
 
-      const result = await zohoPost<{ message: string; categorized_transaction?: any }>(
-        `/bankaccounts/${args.account_id}/statement/${args.statement_id}/categorize`,
+      const result = await zohoPost<{ message: string }>(
+        `/banking/transactions/${args.statement_transaction_id}/categorize`,
         args.organization_id,
         payload
       )
 
       if (!result.ok) {
-        const err = result.errorMessage || "Failed to categorize transaction"
-        if (err.includes("400") || err.toLowerCase().includes("already")) {
-          return `⚠️ Statement entry \`${args.statement_id}\` is already categorized — no action taken.`
-        }
-        if (err.includes("404")) {
-          return `❌ Statement entry \`${args.statement_id}\` not found in account \`${args.account_id}\`. Verify the statement_id from list_bank_statement_transactions.`
-        }
-        if (err.includes("401")) {
-          return "❌ Authentication failed. Check ZOHO_ACCESS_TOKEN on Railway."
-        }
-        return `❌ Categorization failed: ${err}`
+        const err = result.errorMessage || "Failed to categorize"
+        if (err.toLowerCase().includes("already")) return `⚠️ Transaction \`${args.statement_transaction_id}\` already categorized — skipped.`
+        if (err.includes("404")) return `❌ Transaction \`${args.statement_transaction_id}\` not found.`
+        return `❌ ${err}`
       }
 
-      return `✅ **Transaction Categorized**
+      return `✅ **Transaction Categorized**\n\n- ID: \`${args.statement_transaction_id}\`\n- Type: ${args.transaction_type}\n- GL Account: \`${args.gl_account_id}\`\n- Amount: INR ${args.amount.toLocaleString("en-IN")}\n- Date: ${args.date}`
+    },
+  })
 
-- Statement ID: \`${args.statement_id}\`
-- Type: ${args.transaction_type}
-- GL Account ID: \`${args.gl_account_id}\`
-- Amount: INR ${args.amount.toLocaleString("en-IN")}
-- Date: ${args.date}
-- Reference: ${args.reference_number || "N/A"}
+  server.addTool({
+    name: "match_bank_transaction",
+    description: `Match a bank feed transaction to an existing bill, invoice, or payment in Zoho Books.
+Links the bank entry to an existing accounting record — no duplicate created.
+transaction_type: bill, invoice, vendor_payment, customer_payment`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.describe("Zoho org ID"),
+      statement_transaction_id: z.string().min(1).describe("Bank feed transaction ID"),
+      zoho_transaction_id: z.string().min(1).describe("ID of existing bill/invoice/payment to match"),
+      transaction_type: z.enum(["bill","invoice","vendor_payment","customer_payment"]),
+    }),
+    annotations: { title: "Match Bank Transaction", readOnlyHint: false, openWorldHint: true },
+    execute: async (args) => {
+      const result = await zohoPost<{ message: string }>(
+        `/banking/transactions/${args.statement_transaction_id}/match`,
+        args.organization_id,
+        { transaction_id: args.zoho_transaction_id, transaction_type: args.transaction_type }
+      )
+      if (!result.ok) return result.errorMessage || "Failed to match transaction"
+      return `✅ **Transaction Matched**\n\n- Bank Entry: \`${args.statement_transaction_id}\`\n- Matched to: \`${args.zoho_transaction_id}\` (${args.transaction_type})`
+    },
+  })
 
-Entry has been removed from uncategorized feed in Zoho Books Banking.`
+  server.addTool({
+    name: "exclude_bank_transaction",
+    description: `Exclude a bank feed transaction from reconciliation.
+Use for duplicates, inter-account transfers, or non-business entries.
+Excluded entries are hidden but NOT deleted — recoverable from Zoho UI.`,
+    parameters: z.object({
+      organization_id: optionalOrganizationIdSchema.describe("Zoho org ID"),
+      statement_transaction_id: z.string().min(1).describe("Bank feed transaction ID to exclude"),
+      reason: z.enum(["duplicate","own_account_transfer","non_business","other"]).describe("Exclusion reason for audit trail"),
+    }),
+    annotations: { title: "Exclude Bank Transaction", readOnlyHint: false, openWorldHint: true },
+    execute: async (args) => {
+      const result = await zohoPost<{ message: string }>(
+        `/banking/transactions/${args.statement_transaction_id}/exclude`,
+        args.organization_id,
+        { reason: args.reason }
+      )
+      if (!result.ok) return result.errorMessage || "Failed to exclude transaction"
+      return `✅ **Transaction Excluded**\n\n- ID: \`${args.statement_transaction_id}\`\n- Reason: ${args.reason}\n\nRecoverable from Zoho Books → Banking → Excluded Transactions.`
     },
   })
 }

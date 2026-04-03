@@ -1,22 +1,30 @@
 /**
- * OAuth token management for Zoho Books API
+ * OAuth token management — per-client token cache
+ *
+ * Each configured client (slug) gets its own cached access token.
+ * Token is refreshed automatically 5 minutes before expiry.
+ * Thread-safe: Node.js is single-threaded; concurrent awaits deduplicate via
+ * the promise cache (pendingRefreshes map).
  */
 
-import { getZohoConfig, getZohoOAuthUrl, validateZohoConfig } from "../config.js"
+import { getActiveClient, getZohoConfig, getZohoOAuthUrl, validateZohoConfig } from "../config.js"
+import type { ClientConfig } from "../config.js"
 
 interface TokenState {
   accessToken: string
-  expiresAt: number
+  expiresAt: number // epoch ms
 }
 
-// Token state (module-level for caching)
-let tokenState: TokenState | null = null
+// Per-client token cache — keyed by client slug
+const tokenCache = new Map<string, TokenState>()
 
-// Token expiry buffer (5 minutes before actual expiry)
-const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000
+// Deduplicate concurrent refresh requests for the same client
+const pendingRefreshes = new Map<string, Promise<string>>()
+
+const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000 // 5 min
 
 /**
- * Error class for OAuth-related errors
+ * Error class for OAuth-related errors — kept for backward compat with api/client.ts
  */
 export class ZohoAuthError extends Error {
   constructor(
@@ -30,99 +38,147 @@ export class ZohoAuthError extends Error {
 }
 
 /**
- * Get a valid access token, refreshing if necessary
+ * Get a valid access token for the currently active client.
+ *
+ * Called by api/client.ts with no arguments — it internally uses
+ * getActiveClient() so the correct credentials are used for whoever
+ * is the active client at call time.
  */
 export async function getAccessToken(): Promise<string> {
-  const config = getZohoConfig()
+  const client = getActiveClient()
+  return getAccessTokenForClient(client)
+}
+
+/**
+ * Get a valid access token for a specific client (used internally).
+ */
+export async function getAccessTokenForClient(client: ClientConfig): Promise<string> {
+  const cached = tokenCache.get(client.slug)
+
+  // Return cached token if still fresh (with 5-min buffer)
+  if (cached && Date.now() < cached.expiresAt - TOKEN_EXPIRY_BUFFER_MS) {
+    return cached.accessToken
+  }
+
+  // Deduplicate concurrent refresh requests for the same client
+  const existing = pendingRefreshes.get(client.slug)
+  if (existing) return existing
+
+  const refreshPromise = refreshTokenForClient(client).finally(() => {
+    pendingRefreshes.delete(client.slug)
+  })
+
+  pendingRefreshes.set(client.slug, refreshPromise)
+  return refreshPromise
+}
+
+async function refreshTokenForClient(client: ClientConfig): Promise<string> {
+  // Validate credentials before attempting refresh
+  const config = getZohoConfig() // gets active client config
   const validation = validateZohoConfig(config)
 
   if (!validation.valid) {
     throw new ZohoAuthError(
-      `Zoho OAuth not configured: ${validation.error}. Set ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, and ZOHO_REFRESH_TOKEN.`,
+      `OAuth not configured for client "${client.slug}": ${validation.error}`,
       "OAUTH_NOT_CONFIGURED"
     )
   }
 
-  // Return cached token if still valid (with 5-minute buffer)
-  if (tokenState && Date.now() < tokenState.expiresAt - TOKEN_EXPIRY_BUFFER_MS) {
-    return tokenState.accessToken
-  }
+  const oauthUrl = client.oauthUrl || getZohoOAuthUrl(client.apiUrl)
 
-  // Refresh the token
-  return refreshAccessToken(config)
-}
-
-/**
- * Refresh the access token using the refresh token
- */
-async function refreshAccessToken(config: {
-  clientId: string
-  clientSecret: string
-  refreshToken: string
-  apiUrl: string
-}): Promise<string> {
-  const oauthUrl = getZohoOAuthUrl(config.apiUrl)
-
+  let response: Response
   try {
-    const response = await fetch(oauthUrl, {
+    response = await fetch(oauthUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "refresh_token",
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        refresh_token: config.refreshToken,
+        client_id: client.clientId,
+        client_secret: client.clientSecret,
+        refresh_token: client.refreshToken,
       }),
     })
-
-    const data = await response.json()
-
-    if (!response.ok) {
-      const errorMessage = data.error_description || data.error || "Unknown error"
-      throw new ZohoAuthError(
-        `Failed to refresh token: ${errorMessage}`,
-        data.error,
-        response.status
-      )
-    }
-
-    if (!data.access_token) {
-      throw new ZohoAuthError("No access token in response", "NO_ACCESS_TOKEN")
-    }
-
-    // Store the new token with expiry (default 1 hour if not specified)
-    const expiresIn = data.expires_in || 3600
-    tokenState = {
-      accessToken: data.access_token,
-      expiresAt: Date.now() + expiresIn * 1000,
-    }
-
-    // Security: Removed console.log to prevent token refresh timing leakage in logs
-    return tokenState.accessToken
-  } catch (error) {
-    if (error instanceof ZohoAuthError) {
-      throw error
-    }
+  } catch (err) {
     throw new ZohoAuthError(
-      `Failed to refresh token: ${error instanceof Error ? error.message : String(error)}`,
-      "REFRESH_FAILED"
+      `Network error refreshing token for "${client.slug}": ${err instanceof Error ? err.message : String(err)}`,
+      "NETWORK_ERROR"
     )
+  }
+
+  let data: Record<string, unknown>
+  try {
+    data = (await response.json()) as Record<string, unknown>
+  } catch {
+    throw new ZohoAuthError(
+      `Non-JSON response from OAuth server for "${client.slug}" (HTTP ${response.status})`,
+      "INVALID_RESPONSE"
+    )
+  }
+
+  if (!response.ok) {
+    const errMsg = (data.error_description as string) || (data.error as string) || "Unknown error"
+    throw new ZohoAuthError(
+      `Token refresh failed for "${client.slug}": ${errMsg}`,
+      data.error as string | undefined,
+      response.status
+    )
+  }
+
+  const accessToken = data.access_token as string | undefined
+  if (!accessToken) {
+    throw new ZohoAuthError(
+      `No access_token in response for "${client.slug}"`,
+      "NO_ACCESS_TOKEN"
+    )
+  }
+
+  const expiresIn = (data.expires_in as number | undefined) ?? 3600
+  const state: TokenState = {
+    accessToken,
+    expiresAt: Date.now() + expiresIn * 1000,
+  }
+
+  tokenCache.set(client.slug, state)
+  // Security: log slug and expiry only — never the token itself
+  console.log(
+    `[oauth] Token refreshed for "${client.slug}" — expires in ${Math.round(expiresIn / 60)}m`
+  )
+
+  return accessToken
+}
+
+/**
+ * Invalidate the cached token for a specific client slug.
+ * Forces a fresh token fetch on the next API call.
+ */
+export function invalidateToken(slug: string): void {
+  tokenCache.delete(slug)
+  console.log(`[oauth] Token cache cleared for "${slug}"`)
+}
+
+/**
+ * Invalidate all cached tokens (e.g., on credential rotation).
+ */
+export function invalidateAllTokens(): void {
+  tokenCache.clear()
+  console.log("[oauth] All token caches cleared")
+}
+
+/**
+ * Check if active client credentials are configured (without refreshing).
+ */
+export function isConfigured(): boolean {
+  try {
+    const client = getActiveClient()
+    return Boolean(client.clientId && client.clientSecret && client.refreshToken)
+  } catch {
+    return false
   }
 }
 
 /**
- * Clear the cached token (useful for testing or forcing refresh)
+ * Clear the cached token — kept for backward compat with tests.
  */
 export function clearTokenCache(): void {
-  tokenState = null
-}
-
-/**
- * Check if credentials are configured (without attempting to refresh)
- */
-export function isConfigured(): boolean {
-  const config = getZohoConfig()
-  return validateZohoConfig(config).valid
+  tokenCache.clear()
 }

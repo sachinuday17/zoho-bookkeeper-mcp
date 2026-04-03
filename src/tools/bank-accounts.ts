@@ -1,120 +1,94 @@
 /**
- * Bank Account tools for Zoho Books API
+ * Bank Account Tools — Zoho Books
+ *
+ * Lean set: account listing and transaction history only.
+ * All statement-feed categorization / reconciliation tools live in bank-reconciliation.ts.
  */
 
 import { z } from "zod"
 import type { FastMCP } from "fastmcp"
-import { zohoGet, zohoPost } from "../api/client.js"
+import { zohoGet } from "../api/client.js"
 import type { BankAccount, BankTransaction } from "../api/types.js"
-import {
-  entityIdSchema,
-  optionalDateSchema,
-  optionalOrganizationIdSchema,
-} from "../utils/validation.js"
+import { entityIdSchema, optionalDateSchema, optionalOrganizationIdSchema } from "../utils/validation.js"
 
-/**
- * Register bank account tools on the server
- */
 export function registerBankAccountTools(server: FastMCP): void {
-  // List Bank Accounts
+
+  // ── list_bank_accounts ─────────────────────────────────────────────────────
+
   server.addTool({
     name: "list_bank_accounts",
-    description: `List all bank accounts in Zoho Books.
-Returns bank account details with name, type, and balance.
-These are the accounts linked in Zoho Books, not live bank data.`,
+    description: `List all bank and credit-card accounts in Zoho Books.
+Returns account ID, name, type, masked account number, and current balance.
+Use account_id values from this tool to pass to reconciliation tools.`,
     parameters: z.object({
       organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+        "Zoho org ID (uses active client if not provided)"
       ),
       filter_by: z
         .enum(["Status.All", "Status.Active", "Status.Inactive"])
         .optional()
-        .describe("Filter by status"),
+        .default("Status.Active"),
       sort_column: z.enum(["account_name", "account_type"]).optional(),
     }),
-    annotations: {
-      title: "List Bank Accounts",
-      readOnlyHint: true,
-      openWorldHint: true,
-    },
+    annotations: { title: "List Bank Accounts", readOnlyHint: true, openWorldHint: true },
     execute: async (args) => {
       const queryParams: Record<string, string> = {}
       if (args.filter_by) queryParams.filter_by = args.filter_by
       if (args.sort_column) queryParams.sort_column = args.sort_column
 
       const result = await zohoGet<{ bankaccounts: BankAccount[] }>(
-        "/bankaccounts",
-        args.organization_id,
-        queryParams
+        "/bankaccounts", args.organization_id, queryParams
       )
-
-      if (!result.ok) {
-        return result.errorMessage || "Failed to list bank accounts"
-      }
+      if (!result.ok) return result.errorMessage || "Failed to list bank accounts"
 
       const accounts = result.data?.bankaccounts || []
+      if (accounts.length === 0) return "No bank accounts found."
 
-      if (accounts.length === 0) {
-        return "No bank accounts found."
-      }
-
-      const formatted = accounts
-        .map((acc, index) => {
-          const balance =
-            acc.balance !== undefined ? ` | Balance: ${acc.currency_code || ""} ${acc.balance}` : ""
-          const digitsOnly = acc.account_number?.replace(/\D/g, "")
-          const maskedAccount =
-            digitsOnly && digitsOnly.length >= 4 ? `****${digitsOnly.slice(-4)}` : "N/A"
-          return `${index + 1}. **${acc.account_name}** (${acc.account_type})
+      const formatted = accounts.map((acc, i) => {
+        const digits = acc.account_number?.replace(/\D/g, "")
+        const masked = digits && digits.length >= 4 ? `****${digits.slice(-4)}` : "N/A"
+        const balance = acc.balance !== undefined
+          ? ` | Balance: ${acc.currency_code || "INR"} ${Number(acc.balance).toLocaleString("en-IN")}`
+          : ""
+        return `${i + 1}. **${acc.account_name}** (${acc.account_type})
    - Account ID: \`${acc.account_id}\`
    - Bank: ${acc.bank_name || "N/A"}
-   - Account Number: ${maskedAccount}
+   - Account Number: ${masked}
    - Active: ${acc.is_active ? "Yes" : "No"}${balance}`
-        })
-        .join("\n\n")
+      }).join("\n\n")
 
-      return `**Bank Accounts** (${accounts.length} accounts)\n\n${formatted}`
+      return `**Bank Accounts** (${accounts.length})\n\n${formatted}`
     },
   })
 
-  // Get Bank Account
+  // ── get_bank_account ───────────────────────────────────────────────────────
+
   server.addTool({
     name: "get_bank_account",
-    description: `Get detailed information about a specific bank account.
-Returns full bank account details including routing number and balance.`,
+    description: `Get full details for a specific bank account.
+Returns routing number (masked), balance, currency, and active status.`,
     parameters: z.object({
       organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+        "Zoho org ID (uses active client if not provided)"
       ),
-      account_id: entityIdSchema.describe("Bank account ID"),
+      account_id: entityIdSchema.describe("Bank account ID from list_bank_accounts"),
     }),
-    annotations: {
-      title: "Get Bank Account Details",
-      readOnlyHint: true,
-      openWorldHint: true,
-    },
+    annotations: { title: "Get Bank Account Details", readOnlyHint: true, openWorldHint: true },
     execute: async (args) => {
       const result = await zohoGet<{ bankaccount: BankAccount }>(
-        `/bankaccounts/${args.account_id}`,
-        args.organization_id
+        `/bankaccounts/${args.account_id}`, args.organization_id
       )
-
-      if (!result.ok) {
-        return result.errorMessage || "Failed to get bank account"
-      }
+      if (!result.ok) return result.errorMessage || "Failed to get bank account"
 
       const account = result.data?.bankaccount
-
-      if (!account) {
-        return "Bank account not found"
-      }
+      if (!account) return "Bank account not found."
 
       const accountDigits = account.account_number?.replace(/\D/g, "")
-      const maskedAccount =
-        accountDigits && accountDigits.length >= 4 ? `****${accountDigits.slice(-4)}` : "N/A"
+      const maskedAcc = accountDigits && accountDigits.length >= 4
+        ? `****${accountDigits.slice(-4)}` : "N/A"
       const routingDigits = account.routing_number?.replace(/\D/g, "")
-      const maskedRouting =
-        routingDigits && routingDigits.length >= 4 ? `****${routingDigits.slice(-4)}` : "N/A"
+      const maskedRouting = routingDigits && routingDigits.length >= 4
+        ? `****${routingDigits.slice(-4)}` : "N/A"
 
       return `**Bank Account Details**
 
@@ -123,23 +97,24 @@ Returns full bank account details including routing number and balance.`,
 - **Type**: ${account.account_type}
 - **Code**: ${account.account_code || "N/A"}
 - **Bank Name**: ${account.bank_name || "N/A"}
-- **Account Number**: ${maskedAccount}
+- **Account Number**: ${maskedAcc}
 - **Routing Number**: ${maskedRouting}
 - **Currency**: ${account.currency_code || "N/A"}
-- **Balance**: ${account.currency_code || ""} ${account.balance || 0}
+- **Balance**: ${account.currency_code || "INR"} ${Number(account.balance || 0).toLocaleString("en-IN")}
 - **Active**: ${account.is_active ? "Yes" : "No"}`
     },
   })
 
-  // List Bank Transactions
+  // ── list_bank_transactions ─────────────────────────────────────────────────
+
   server.addTool({
     name: "list_bank_transactions",
-    description: `List bank transactions in Zoho Books.
-Returns transactions recorded in Zoho Books for bank reconciliation.
-These are transactions imported/entered in Zoho, not live bank feeds.`,
+    description: `List posted bank transactions recorded in Zoho Books for a given account.
+These are transactions already matched/categorized — use list_bank_statement_transactions
+to see uncategorized entries pending reconciliation.`,
     parameters: z.object({
       organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
+        "Zoho org ID (uses active client if not provided)"
       ),
       account_id: entityIdSchema.describe("Bank account ID"),
       date_start: optionalDateSchema.describe("Start date (YYYY-MM-DD)"),
@@ -149,15 +124,9 @@ These are transactions imported/entered in Zoho, not live bank feeds.`,
       page: z.number().int().positive().optional(),
       per_page: z.number().int().min(1).max(200).optional(),
     }),
-    annotations: {
-      title: "List Bank Transactions",
-      readOnlyHint: true,
-      openWorldHint: true,
-    },
+    annotations: { title: "List Bank Transactions", readOnlyHint: true, openWorldHint: true },
     execute: async (args) => {
-      const queryParams: Record<string, string> = {
-        account_id: args.account_id,
-      }
+      const queryParams: Record<string, string> = { account_id: args.account_id }
       if (args.date_start) queryParams.date_start = args.date_start
       if (args.date_end) queryParams.date_end = args.date_end
       if (args.status) queryParams.status = args.status
@@ -166,223 +135,25 @@ These are transactions imported/entered in Zoho, not live bank feeds.`,
       if (args.per_page) queryParams.per_page = args.per_page.toString()
 
       const result = await zohoGet<{ banktransactions: BankTransaction[] }>(
-        "/banktransactions",
-        args.organization_id,
-        queryParams
+        "/banktransactions", args.organization_id, queryParams
       )
-
-      if (!result.ok) {
-        return result.errorMessage || "Failed to list bank transactions"
-      }
+      if (!result.ok) return result.errorMessage || "Failed to list bank transactions"
 
       const transactions = result.data?.banktransactions || []
+      if (transactions.length === 0) return "No bank transactions found."
 
-      if (transactions.length === 0) {
-        return "No bank transactions found."
-      }
-
-      const formatted = transactions
-        .map((tx, index) => {
-          const amount = tx.debit_or_credit === "debit" ? `-${tx.amount}` : `+${tx.amount}`
-          return `${index + 1}. **${tx.date}** - ${tx.currency_code || ""} ${amount}
+      const formatted = transactions.map((tx, i) => {
+        const sign = tx.debit_or_credit === "debit" ? "−" : "+"
+        const amount = `${tx.currency_code || "INR"} ${sign}${Number(tx.amount).toLocaleString("en-IN")}`
+        return `${i + 1}. **${tx.date}** — ${amount}
    - Transaction ID: \`${tx.transaction_id}\`
-   - Type: ${tx.transaction_type}
-   - Status: ${tx.status}
+   - Type: ${tx.transaction_type || "N/A"}
+   - Status: ${tx.status || "N/A"}
    - Payee: ${tx.payee || "N/A"}
-   - Reference: ${tx.reference_number || "N/A"}
-   - Description: ${tx.description || "N/A"}`
-        })
-        .join("\n\n")
+   - Reference: ${tx.reference_number || "N/A"}`
+      }).join("\n\n")
 
-      return `**Bank Transactions** (${transactions.length} transactions)\n\n${formatted}`
-    },
-  })
-
-  // List Bank Statement Transactions (feed)
-  server.addTool({
-    name: "list_bank_statement_transactions",
-    description: `List bank statement feed transactions from Zoho Books Banking module.
-Returns uncategorized entries visible in Banking UI.
-Use to get transaction_id values for categorize_bank_statement_transaction.`,
-    parameters: z.object({
-      organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
-      ),
-      account_id: entityIdSchema.describe(
-        "Bank account ID — e.g. 1145125000001109343 for Zoho Payroll Bank Account"
-      ),
-      status: z
-        .enum(["All", "Uncategorized", "Categorized"])
-        .optional()
-        .default("Uncategorized"),
-      page: z.number().int().positive().optional(),
-      per_page: z.number().int().min(1).max(200).optional(),
-    }),
-    annotations: {
-      title: "List Bank Statement Transactions",
-      readOnlyHint: true,
-      openWorldHint: true,
-    },
-    execute: async (args) => {
-      const queryParams: Record<string, string> = {}
-      if (args.status) queryParams.status = args.status
-      if (args.page) queryParams.page = args.page.toString()
-      if (args.per_page) queryParams.per_page = args.per_page.toString()
-
-      const result = await zohoGet<{ statement_transactions: unknown[] }>(
-        `/bankaccounts/${args.account_id}/statement`,
-        args.organization_id,
-        queryParams
-      )
-
-      if (!result.ok) {
-        return result.errorMessage || "Failed to list bank statement transactions"
-      }
-
-      const transactions = result.data?.statement_transactions || []
-
-      if (transactions.length === 0) {
-        return "No statement transactions found."
-      }
-
-      return `**Bank Feed Transactions** (${transactions.length} entries)\n\n${JSON.stringify(transactions, null, 2)}`
-    },
-  })
-
-  // Categorize Bank Statement Transaction
-  server.addTool({
-    name: "categorize_bank_statement_transaction",
-    description: `Categorize a bank feed transaction in Zoho Books Banking module.
-Performs the same action as the Categorize button in Banking UI.
-Does NOT create a duplicate — links existing feed entry to a GL account.
-
-Endpoint: POST /bankaccounts/{account_id}/transactions/{transaction_id}/categorize
-
-REQUIRED PARAMETERS:
-- account_id: the BANK account ID (1145125000001109343)
-- statement_transaction_id: transaction_id from list_bank_statement_transactions
-- gl_account_id: the GL/expense/income account to post to
-- transaction_type: expense | deposit | transfer_fund | owner_drawings | owner_contribution | other_income | refund`,
-    parameters: z.object({
-      organization_id: optionalOrganizationIdSchema.optional(),
-      account_id: entityIdSchema.describe(
-        "BANK account ID — 1145125000001109343 for Zoho Payroll Bank Account"
-      ),
-      statement_transaction_id: entityIdSchema.describe(
-        "transaction_id from list_bank_statement_transactions"
-      ),
-      gl_account_id: entityIdSchema.describe(
-        "GL account to categorize against — expense/income/asset account, NOT the bank account"
-      ),
-      transaction_type: z
-        .enum([
-          "expense",
-          "deposit",
-          "transfer_fund",
-          "owner_contribution",
-          "owner_drawings",
-          "other_income",
-          "refund",
-        ])
-        .describe("Transaction type — determines GL debit/credit direction"),
-      amount: z.number().positive(),
-      date: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/),
-      description: z.string().max(500).optional(),
-      reference_number: z.string().max(100).optional(),
-      vendor_id: z.string().optional(),
-      customer_id: z.string().optional(),
-    }),
-    execute: async (args) => {
-      const body: Record<string, unknown> = {
-        transaction_type: args.transaction_type,
-        amount: args.amount,
-        date: args.date,
-        account_id: args.gl_account_id,
-      }
-      if (args.description) body.description = args.description
-      if (args.reference_number) body.reference_number = args.reference_number
-      if (args.vendor_id) body.vendor_id = args.vendor_id
-      if (args.customer_id) body.customer_id = args.customer_id
-
-      const result = await zohoPost(
-        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/categorize`,
-        args.organization_id,
-        body
-      )
-
-      if (!result.ok) {
-        return result.errorMessage || "Categorization failed"
-      }
-      return `✅ Transaction ${args.statement_transaction_id} categorized successfully.`
-    },
-  })
-
-  // Match Bank Transaction
-  server.addTool({
-    name: "match_bank_transaction",
-    description: `Match a bank feed transaction to an existing bill, invoice, or payment.
-Links the bank entry to an existing accounting record — no duplicate created.
-transaction_type: bill | invoice | vendor_payment | customer_payment`,
-    parameters: z.object({
-      organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
-      ),
-      account_id: entityIdSchema.describe("Bank account ID"),
-      statement_transaction_id: entityIdSchema.describe("Bank feed transaction ID"),
-      transaction_type: z.enum(["bill", "invoice", "vendor_payment", "customer_payment"]),
-      zoho_transaction_id: entityIdSchema.describe(
-        "ID of existing bill/invoice/payment to match"
-      ),
-    }),
-    execute: async (args) => {
-      const body: Record<string, unknown> = {
-        transaction_type: args.transaction_type,
-        transaction_id: args.zoho_transaction_id,
-      }
-
-      const result = await zohoPost(
-        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/match`,
-        args.organization_id,
-        body
-      )
-
-      if (!result.ok) {
-        return result.errorMessage || "Match failed"
-      }
-      return `✅ Transaction ${args.statement_transaction_id} matched successfully.`
-    },
-  })
-
-  // Exclude Bank Transaction
-  server.addTool({
-    name: "exclude_bank_transaction",
-    description: `Exclude a bank feed transaction from reconciliation.
-Use for duplicates, inter-account transfers, or non-business entries.
-Excluded entries are hidden but recoverable from Zoho UI.
-reason: duplicate | own_account_transfer | non_business | other`,
-    parameters: z.object({
-      organization_id: optionalOrganizationIdSchema.describe(
-        "Zoho org ID (uses ZOHO_ORGANIZATION_ID env var if not provided)"
-      ),
-      account_id: entityIdSchema.describe("Bank account ID"),
-      statement_transaction_id: entityIdSchema.describe("Bank feed transaction ID to exclude"),
-      reason: z.enum(["duplicate", "own_account_transfer", "non_business", "other"]),
-    }),
-    execute: async (args) => {
-      const body: Record<string, unknown> = {
-        reason: args.reason,
-      }
-
-      const result = await zohoPost(
-        `/bankaccounts/${args.account_id}/transactions/${args.statement_transaction_id}/exclude`,
-        args.organization_id,
-        body
-      )
-
-      if (!result.ok) {
-        return result.errorMessage || "Exclude failed"
-      }
-      return `✅ Transaction ${args.statement_transaction_id} excluded successfully.`
+      return `**Bank Transactions** (${transactions.length})\n\n${formatted}`
     },
   })
 }

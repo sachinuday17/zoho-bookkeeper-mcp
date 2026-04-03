@@ -132,11 +132,15 @@ function loadClients(): Map<string, ClientConfig> {
   }
 
   if (clients.size === 0) {
-    throw new Error(
-      "No Zoho clients configured.\n" +
+    // Do NOT throw here — the HTTP server must start so the /health endpoint
+    // can respond. Tools will throw lazily when invoked without configuration.
+    console.warn(
+      "[config] WARNING: No Zoho clients configured. Server will start but all " +
+      "tool calls will fail until credentials are added.\n" +
       "Multi-client: add CLIENT_<SLUG>_CLIENT_ID / _CLIENT_SECRET / _REFRESH_TOKEN / _ORG_ID\n" +
       "Single-client: add ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET / ZOHO_REFRESH_TOKEN"
     )
+    return clients // return empty map — health endpoint still works
   }
 
   const names = [...clients.keys()].join(", ")
@@ -151,6 +155,15 @@ export const _clientRegistry: Map<string, ClientConfig> = loadClients()
 let _activeSlug: string = _clientRegistry.keys().next().value as string
 
 export function getActiveClient(): ClientConfig {
+  if (_clientRegistry.size === 0) {
+    throw new Error(
+      "No Zoho Books clients are configured on this server.\n" +
+      "Go to Railway → your service → Variables and add:\n" +
+      "  CLIENT_<SLUG>_CLIENT_ID, _CLIENT_SECRET, _REFRESH_TOKEN, _ORG_ID\n" +
+      "Example: CLIENT_FLUTCH_CLIENT_ID=1000.xxx\n" +
+      "Redeploy after adding the variables."
+    )
+  }
   const client = _clientRegistry.get(_activeSlug)
   if (!client) throw new Error(`Active client "${_activeSlug}" not found in registry — this should never happen`)
   return client

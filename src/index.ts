@@ -11,7 +11,7 @@
 
 import { FastMCP } from "fastmcp"
 import type { IncomingMessage } from "http"
-import { getServerConfig } from "./config.js"
+import { getServerConfig, _clientRegistry, getActiveSlug } from "./config.js"
 
 // ── Tool registrations ────────────────────────────────────────────────────────
 import { registerClientSwitcherTools } from "./tools/client-switcher.js"
@@ -121,7 +121,9 @@ It is accepted as an optional override if needed.
       service: "zoho-bookkeeper-mcp",
       version: "2.0.0",
       timestamp: new Date().toISOString(),
-      auth: apiKey ? "bearer-token" : "open",
+      auth: apiKey ? "bearer-token" : "open-no-auth-WARNING",
+      clients_configured: _clientRegistry.size,
+      active_client: _clientRegistry.size > 0 ? getActiveSlug() : "none",
     }),
     path: "/health",
     status: 200,

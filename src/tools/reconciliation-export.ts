@@ -59,24 +59,57 @@ interface BankStatementTxn {
 
 // ─── CSV Helpers ──────────────────────────────────────────────────────────────
 
+/**
+ * Full column set for manual CA review in Excel.
+ *
+ * READ-ONLY (do not edit — from Zoho):
+ *   Sr_No, Bank_Account_ID, Bank_Account_Name, Transaction_ID, Date, Month,
+ *   Amount, Dr_Cr, Payee, Description, Reference
+ *
+ * AI SUGGESTIONS (review, override with CA columns if wrong):
+ *   AI_Category, AI_Account_Name, AI_Account_ID, AI_Transaction_Type,
+ *   AI_Confidence, AI_Reasoning
+ *
+ * CA REVIEW COLUMNS — fill these to categorize:
+ *   CA_Account_ID       GL account ID (overrides AI_Account_ID)
+ *   CA_Account_Name     account name if you don't have ID (import looks it up)
+ *   CA_Transaction_Type expense/deposit/transfer_fund/owner_drawings/
+ *                       owner_contribution/other_income/refund
+ *   CA_Action           categorize (default) | match | exclude | skip
+ *   CA_Match_ID         invoice_id or bill_id when CA_Action=match
+ *   CA_Vendor_ID        vendor/customer contact ID (optional)
+ *   CA_Notes            free text notes
+ *   Approve             Y to include in import
+ */
 const CSV_HEADERS = [
+  // Read-only
+  "Sr_No",
   "Bank_Account_ID",
+  "Bank_Account_Name",
   "Transaction_ID",
   "Date",
+  "Month",
   "Amount",
-  "Debit_Credit",
+  "Dr_Cr",
   "Payee",
   "Description",
   "Reference",
+  // AI suggestions
   "AI_Category",
+  "AI_Account_Name",
   "AI_Account_ID",
   "AI_Transaction_Type",
   "AI_Confidence",
   "AI_Reasoning",
-  "CA_Account_ID",    // ← CA fills: GL account ID for categorization
-  "CA_Transaction_Type", // ← CA fills: expense/deposit/transfer_fund/etc.
-  "CA_Notes",         // ← CA fills: free text notes
-  "Approve",          // ← CA fills: Y to execute
+  // CA review (fill these)
+  "CA_Account_ID",
+  "CA_Account_Name",
+  "CA_Transaction_Type",
+  "CA_Action",
+  "CA_Match_ID",
+  "CA_Vendor_ID",
+  "CA_Notes",
+  "Approve",
 ]
 
 /**
@@ -279,164 +312,195 @@ also writes the file to disk (must be in an allowed directory).`,
     annotations: { title: "Export Uncategorized Transactions to CSV", readOnlyHint: true, openWorldHint: true },
 
     execute: async (args) => {
-      // ── Fetch uncategorized transactions (paginated) ─────────────────────────
-
       const maxTxns = args.max_transactions ?? 500
-      const allTxns: BankStatementTxn[] = []
-      let page = 1
-      const perPage = 200
 
-      while (allTxns.length < maxTxns) {
-        const queryParams: Record<string, string> = {
-          status: "uncategorized",
-          per_page: String(perPage),
-          page: String(page),
+      // ── Fetch in parallel: transactions + COA + bank account name ─────────────
+      const txnFetchPromise = (async () => {
+        const all: BankStatementTxn[] = []
+        let page = 1
+        while (all.length < maxTxns) {
+          const qp: Record<string, string> = {
+            status: "uncategorized",
+            per_page: "200",
+            page: String(page),
+          }
+          if (args.date_start) qp.date_start = args.date_start
+          if (args.date_end) qp.date_end = args.date_end
+
+          const res = await zohoGet<{ banktransactions: BankStatementTxn[] }>(
+            `/bankaccounts/${args.account_id}/statement`,
+            args.organization_id,
+            qp
+          )
+          if (!res.ok) return { txns: [] as BankStatementTxn[], error: res.errorMessage }
+          const batch = res.data?.banktransactions ?? []
+          all.push(...batch)
+          if (batch.length < 200) break
+          page++
         }
-        if (args.date_start) queryParams.date_start = args.date_start
-        if (args.date_end) queryParams.date_end = args.date_end
+        return { txns: all.slice(0, maxTxns), error: undefined }
+      })()
 
-        const result = await zohoGet<{ banktransactions: BankStatementTxn[] }>(
-          `/bankaccounts/${args.account_id}/statement`,
-          args.organization_id,
-          queryParams
-        )
+      const coaPromise = zohoGet<{ chartofaccounts: GLAccount[] }>(
+        "/chartofaccounts",
+        args.organization_id,
+        { per_page: "500" }
+      )
 
-        if (!result.ok) {
-          return `Failed to fetch transactions (page ${page}): ${result.errorMessage}`
-        }
+      const bankAccountPromise = zohoGet<{ bankaccount: { account_name?: string; current_balance?: number } }>(
+        `/bankaccounts/${args.account_id}`,
+        args.organization_id
+      )
 
-        const batch = result.data?.banktransactions ?? []
-        allTxns.push(...batch)
+      const [txnResult, coaResult, bankAccResult] = await Promise.all([
+        txnFetchPromise,
+        coaPromise,
+        bankAccountPromise,
+      ])
 
-        // If fewer than perPage returned, we've reached the last page
-        if (batch.length < perPage) break
-        page++
-      }
+      if (txnResult.error) return `Failed to fetch transactions: ${txnResult.error}`
 
-      if (allTxns.length === 0) {
-        return `✅ No uncategorized transactions found for account \`${args.account_id}\`.${
+      const txns = txnResult.txns
+      const truncated = txns.length === maxTxns
+      const accounts: GLAccount[] = coaResult.ok ? (coaResult.data?.chartofaccounts ?? []) : []
+      const bankAccountName = bankAccResult.ok
+        ? (bankAccResult.data?.bankaccount?.account_name ?? args.account_id)
+        : args.account_id
+
+      if (txns.length === 0) {
+        return `✅ No uncategorized transactions found for **${bankAccountName}** (\`${args.account_id}\`).${
           args.date_start || args.date_end
             ? ` (Filter: ${args.date_start ?? "any"} → ${args.date_end ?? "any"})`
             : ""
         }`
       }
 
-      // Trim to max
-      const txns = allTxns.slice(0, maxTxns)
-      const truncated = allTxns.length > maxTxns
-
-      // ── Fetch Chart of Accounts for GL account ID matching ────────────────────
-
-      let accounts: GLAccount[] = []
-      const coaResult = await zohoGet<{ chartofaccounts: GLAccount[] }>(
-        "/chartofaccounts",
-        args.organization_id,
-        { per_page: "500" }
-      )
-      if (coaResult.ok) {
-        accounts = coaResult.data?.chartofaccounts ?? []
+      // ── Build a COA lookup map: account_id → account_name ────────────────────
+      const coaNameMap = new Map<string, string>()
+      for (const acc of accounts) {
+        coaNameMap.set(acc.account_id, acc.account_name)
       }
-      // Non-fatal — proceed without COA if fetch fails
 
       // ── Build CSV ─────────────────────────────────────────────────────────────
-
-      const csvLines: string[] = []
-      // UTF-8 BOM for Excel compatibility
       const BOM = "\uFEFF"
-
+      const csvLines: string[] = []
       csvLines.push(buildCSVRow(CSV_HEADERS))
 
-      let highCount = 0
-      let mediumCount = 0
-      let lowCount = 0
+      let highCount = 0, mediumCount = 0, lowCount = 0
+      let totalDebit = 0, totalCredit = 0
 
-      for (const tx of txns) {
+      for (let i = 0; i < txns.length; i++) {
+        const tx = txns[i]
         const suggestion = suggestCategory(tx.payee, tx.description, tx.debit_or_credit)
+        const aiAccountId = accounts.length > 0 ? findAccountId(accounts, suggestion.category) : ""
+        const aiAccountName = aiAccountId ? (coaNameMap.get(aiAccountId) ?? "") : ""
+        const amt = Number(tx.amount) || 0
+        const month = tx.date?.slice(0, 7) ?? ""  // YYYY-MM
+        const drCr = tx.debit_or_credit === "debit" ? "Dr" : "Cr"
 
-        // Attempt to match suggested category to a real GL account
-        const aiAccountId = accounts.length > 0
-          ? findAccountId(accounts, suggestion.category)
-          : ""
+        if (tx.debit_or_credit === "debit") totalDebit += amt
+        else totalCredit += amt
 
         if (suggestion.confidence === "High") highCount++
         else if (suggestion.confidence === "Medium") mediumCount++
         else lowCount++
 
         csvLines.push(buildCSVRow([
-          args.account_id,
-          tx.transaction_id,
-          tx.date,
-          tx.amount,
-          tx.debit_or_credit,
-          tx.payee ?? "",
-          tx.description ?? "",
-          tx.reference_number ?? "",
-          suggestion.category,
-          aiAccountId,
-          suggestion.transaction_type,
-          suggestion.confidence,
-          suggestion.reasoning,
-          "", // CA_Account_ID — blank for CA to fill
-          "", // CA_Transaction_Type — blank for CA to fill
-          "", // CA_Notes — blank for CA to fill
-          "", // Approve — blank for CA to fill
+          i + 1,                      // Sr_No
+          args.account_id,            // Bank_Account_ID
+          bankAccountName,            // Bank_Account_Name
+          tx.transaction_id,          // Transaction_ID
+          tx.date,                    // Date
+          month,                      // Month
+          amt,                        // Amount
+          drCr,                       // Dr_Cr
+          tx.payee ?? "",             // Payee
+          tx.description ?? "",       // Description
+          tx.reference_number ?? "",  // Reference
+          suggestion.category,        // AI_Category
+          aiAccountName,              // AI_Account_Name
+          aiAccountId,                // AI_Account_ID
+          suggestion.transaction_type,// AI_Transaction_Type
+          suggestion.confidence,      // AI_Confidence
+          suggestion.reasoning,       // AI_Reasoning
+          "",                         // CA_Account_ID
+          "",                         // CA_Account_Name
+          "",                         // CA_Transaction_Type
+          "categorize",               // CA_Action  (pre-filled default)
+          "",                         // CA_Match_ID
+          "",                         // CA_Vendor_ID
+          "",                         // CA_Notes
+          "",                         // Approve
         ]))
       }
 
       const csvContent = BOM + csvLines.join("\n")
 
-      // ── Optionally write to disk ───────────────────────────────────────────────
+      // ── Suggest filename ──────────────────────────────────────────────────────
+      const safeAccountName = bankAccountName.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_").slice(0, 30)
+      const today = new Date().toISOString().slice(0, 10)
+      const suggestedFilename = `reconciliation_${safeAccountName}_${today}.csv`
 
+      // ── Optionally write to server disk ──────────────────────────────────────
       let fileWriteStatus = ""
       if (args.output_path) {
         const pathCheck = validateCSVPath(args.output_path)
         if (!pathCheck.valid || !pathCheck.resolvedPath) {
-          fileWriteStatus = `\n⚠️ File NOT written: ${pathCheck.error}`
+          fileWriteStatus = `⚠️ File NOT written: ${pathCheck.error}`
         } else {
           try {
             const dir = path.dirname(pathCheck.resolvedPath)
-            if (!fs.existsSync(dir)) {
-              fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-            }
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
             fs.writeFileSync(pathCheck.resolvedPath, csvContent, { encoding: "utf8", mode: 0o600 })
-            fileWriteStatus = `\n✅ File written: ${pathCheck.resolvedPath}`
+            fileWriteStatus = `✅ File written to server: ${pathCheck.resolvedPath}`
           } catch (e) {
-            fileWriteStatus = `\n⚠️ File write failed: ${e instanceof Error ? e.message : String(e)}`
+            fileWriteStatus = `⚠️ File write failed: ${e instanceof Error ? e.message : String(e)}`
           }
         }
       }
 
       // ── Build response ────────────────────────────────────────────────────────
+      const periodLabel = args.date_start || args.date_end
+        ? ` | Period: ${args.date_start ?? "start"} → ${args.date_end ?? "today"}`
+        : ""
 
-      const header = [
-        `**Reconciliation Export — Account \`${args.account_id}\`**`,
+      const summary = [
+        `**Uncategorized Transactions Export**`,
+        `Account: **${bankAccountName}** (\`${args.account_id}\`)${periodLabel}`,
         "",
-        `| Metric | Value |`,
-        `|--------|-------|`,
-        `| Transactions exported | ${txns.length}${truncated ? ` (capped at ${maxTxns} — run again with date filters for remainder)` : ""} |`,
-        `| AI High confidence | ${highCount} |`,
-        `| AI Medium confidence | ${mediumCount} |`,
-        `| AI Low confidence (CA must review) | ${lowCount} |`,
-        `| GL accounts fetched | ${accounts.length} |`,
-        fileWriteStatus ? fileWriteStatus.replace(/^\\n/, "") : "",
+        `| | |`,
+        `|---|---|`,
+        `| Transactions | ${txns.length}${truncated ? ` ⚠️ (capped — use date filters to export more)` : ""} |`,
+        `| Total Debits | INR ${totalDebit.toLocaleString("en-IN")} |`,
+        `| Total Credits | INR ${totalCredit.toLocaleString("en-IN")} |`,
+        `| AI High confidence | ${highCount} (safe to auto-approve) |`,
+        `| AI Medium confidence | ${mediumCount} (review before approving) |`,
+        `| AI Low confidence | ${lowCount} (must fill CA columns manually) |`,
+        `| COA accounts loaded | ${accounts.length} |`,
+        fileWriteStatus ? `| Server file | ${fileWriteStatus} |` : "",
         "",
-        "**Instructions for CA:**",
-        "1. Copy the CSV below into Excel (or save the file if output_path was set)",
-        "2. Review AI suggestions — override CA_Account_ID and CA_Transaction_Type where needed",
-        "3. Mark **Approve = Y** for each row you approve",
-        "4. Save the file",
-        "5. Provide the approved CSV to Claude via `import_approved_reconciliation`",
+        `**Suggested filename:** \`${suggestedFilename}\``,
         "",
-        "**CA_Transaction_Type valid values:**",
-        "  `expense` | `deposit` | `transfer_fund` | `owner_drawings` | `owner_contribution` | `other_income` | `refund`",
+        "**How to use this file:**",
+        "1. Save the CSV below as `" + suggestedFilename + "` and open in Excel",
+        "2. **Columns to fill** (yellow in Excel convention):",
+        "   - `CA_Account_ID` or `CA_Account_Name` — which GL account to post to",
+        "   - `CA_Transaction_Type` — expense / deposit / transfer_fund / other_income / refund",
+        "   - `CA_Action` — leave as `categorize` (default), or use `match` / `exclude` / `skip`",
+        "   - `CA_Match_ID` — only if CA_Action = `match` (paste invoice_id or bill_id here)",
+        "   - `CA_Notes` — any note you want attached to the transaction",
+        "   - `Approve` — type **Y** for every row you want imported",
+        "3. Save the file and give it back to Claude with: `import_approved_reconciliation`",
         "",
-        `**CSV Data** (${txns.length} rows):`,
-        "```csv",
-      ]
-        .filter(line => line !== undefined)
-        .join("\n")
+        `---`,
+        `SAVE_FILENAME: ${suggestedFilename}`,
+        `TRANSACTION_COUNT: ${txns.length}`,
+        `---`,
+        "",
+        `\`\`\`csv`,
+      ].filter(Boolean).join("\n")
 
-      return `${header}\n${csvContent}\n\`\`\``
+      return `${summary}\n${csvContent}\n\`\`\``
     },
   })
 
@@ -554,8 +618,11 @@ Input: either csv_content (paste the CSV text) OR file_path (local file path).`,
         transactionId: string
         date: string
         amount: number
-        accountId: string // GL account
+        accountId: string
         transactionType: string
+        action: "categorize" | "match" | "exclude" | "skip"
+        matchId: string
+        vendorId: string
         notes: string
         validationError?: string
       }
@@ -564,48 +631,65 @@ Input: either csv_content (paste the CSV text) OR file_path (local file path).`,
 
       for (let i = 0; i < approvedRows.length; i++) {
         const row = approvedRows[i]
-        const rowNum = i + 2 // 1-based, accounting for header row
+        const rowNum = i + 2
 
         const bankAccountId = row["bank_account_id"]?.trim()
         const transactionId = row["transaction_id"]?.trim()
         const date = row["date"]?.trim()
         const rawAmount = row["amount"]?.trim()
-        const debitOrCredit = row["debit_or_credit"]?.trim()?.toLowerCase()
+        // Support both old (debit_credit) and new (dr_cr) column names
+        const drCrRaw = (row["dr_cr"] || row["debit_credit"] || row["debit_or_credit"] || "").trim().toLowerCase()
+        const isDebit = drCrRaw === "debit" || drCrRaw === "dr"
 
-        // GL account: CA override takes priority
+        // CA_Action: default to "categorize"
+        const rawAction = (row["ca_action"] ?? "categorize").trim().toLowerCase()
+        const action: ExecutionItem["action"] =
+          rawAction === "match" ? "match"
+          : rawAction === "exclude" ? "exclude"
+          : rawAction === "skip" ? "skip"
+          : "categorize"
+
+        // GL account: CA_Account_ID > AI_Account_ID
         const accountId = (row["ca_account_id"]?.trim() || row["ai_account_id"]?.trim()) ?? ""
 
-        // Transaction type: CA override takes priority
+        // Transaction type: CA > AI > default by direction
         const rawTxnType = (row["ca_transaction_type"]?.trim() || row["ai_transaction_type"]?.trim()) ?? ""
-        const transactionType = rawTxnType || (debitOrCredit === "debit" ? "expense" : "deposit")
+        const transactionType = rawTxnType || (isDebit ? "expense" : "deposit")
 
+        const matchId = row["ca_match_id"]?.trim() ?? ""
+        const vendorId = row["ca_vendor_id"]?.trim() ?? ""
         const notes = row["ca_notes"]?.trim() ?? ""
 
-        // Validation
         let validationError: string | undefined
 
-        if (!bankAccountId) validationError = "Missing Bank_Account_ID"
-        else if (!transactionId) validationError = "Missing Transaction_ID"
-        else if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) validationError = "Invalid or missing Date (expected YYYY-MM-DD)"
-        else if (!rawAmount || isNaN(Number(rawAmount))) validationError = "Invalid or missing Amount"
-        else if (!accountId) validationError = "No GL account ID: fill CA_Account_ID or ensure AI_Account_ID is populated"
-        else {
+        if (!bankAccountId) {
+          validationError = "Missing Bank_Account_ID"
+        } else if (!transactionId) {
+          validationError = "Missing Transaction_ID"
+        } else if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          validationError = "Invalid or missing Date (expected YYYY-MM-DD)"
+        } else if (!rawAmount || isNaN(Number(rawAmount))) {
+          validationError = "Invalid or missing Amount"
+        } else if (action === "categorize" && !accountId) {
+          validationError = "No GL account ID: fill CA_Account_ID (or CA_Account_Name) — check list_accounts for IDs"
+        } else if (action === "match" && !matchId) {
+          validationError = "CA_Action=match requires CA_Match_ID (invoice_id or bill_id)"
+        } else if (action === "categorize") {
           const validTypes = ["expense", "deposit", "transfer_fund", "owner_contribution", "owner_drawings", "other_income", "refund"]
           if (!validTypes.includes(transactionType)) {
-            validationError = `Invalid transaction_type "${transactionType}". Must be one of: ${validTypes.join(", ")}`
+            validationError = `Invalid CA_Transaction_Type "${transactionType}". Valid: ${validTypes.join(", ")}`
           }
         }
 
-        // Security: validate IDs are alphanumeric only (no injection)
-        if (!validationError && !/^[a-zA-Z0-9_-]+$/.test(bankAccountId!)) {
+        // ID injection protection
+        if (!validationError && !/^[a-zA-Z0-9_-]+$/.test(bankAccountId!))
           validationError = `Invalid Bank_Account_ID format: "${bankAccountId}"`
-        }
-        if (!validationError && !/^[a-zA-Z0-9_-]+$/.test(transactionId!)) {
+        if (!validationError && !/^[a-zA-Z0-9_-]+$/.test(transactionId!))
           validationError = `Invalid Transaction_ID format: "${transactionId}"`
-        }
-        if (!validationError && !/^[a-zA-Z0-9_-]+$/.test(accountId)) {
-          validationError = `Invalid GL Account_ID format: "${accountId}"`
-        }
+        if (!validationError && action === "categorize" && accountId && !/^[a-zA-Z0-9_-]+$/.test(accountId))
+          validationError = `Invalid CA_Account_ID format: "${accountId}"`
+        if (!validationError && action === "match" && matchId && !/^[a-zA-Z0-9_-]+$/.test(matchId))
+          validationError = `Invalid CA_Match_ID format: "${matchId}"`
 
         plan.push({
           rowNum,
@@ -615,6 +699,9 @@ Input: either csv_content (paste the CSV text) OR file_path (local file path).`,
           amount: Number(rawAmount ?? 0),
           accountId,
           transactionType,
+          action,
+          matchId,
+          vendorId,
           notes,
           validationError,
         })
@@ -636,10 +723,18 @@ Input: either csv_content (paste the CSV text) OR file_path (local file path).`,
         if (validItems.length > 0) {
           lines.push("**Would execute:**")
           for (const item of validItems) {
+            let actionDesc: string
+            if (item.action === "skip") {
+              actionDesc = `SKIP (no API call)`
+            } else if (item.action === "exclude") {
+              actionDesc = `EXCLUDE txn \`${item.transactionId}\``
+            } else if (item.action === "match") {
+              actionDesc = `MATCH txn \`${item.transactionId}\` → \`${item.matchId}\``
+            } else {
+              actionDesc = `CATEGORIZE txn \`${item.transactionId}\` → account \`${item.accountId}\` | type: ${item.transactionType}`
+            }
             lines.push(
-              `  Row ${item.rowNum}: CATEGORIZE txn \`${item.transactionId}\` → ` +
-              `account \`${item.accountId}\` | type: ${item.transactionType} | ` +
-              `${item.date} | INR ${item.amount.toLocaleString("en-IN")}`
+              `  Row ${item.rowNum}: ${actionDesc} | ${item.date} | INR ${item.amount.toLocaleString("en-IN")}`
             )
           }
           lines.push("")
@@ -697,25 +792,72 @@ Input: either csv_content (paste the CSV text) OR file_path (local file path).`,
       }
 
       // Execute valid items
+      let apiCallCount = 0
       for (let idx = 0; idx < validItems.length; idx++) {
         const item = validItems[idx]
 
-        // Rate limit: 700 ms between calls (not before the first call)
-        if (idx > 0) await sleep(700)
-
-        const payload: Record<string, unknown> = {
-          transaction_type: item.transactionType,
-          account_id: item.accountId,
-          amount: item.amount,
-          date: item.date,
+        // ── skip: no API call ──────────────────────────────────────────────────
+        if (item.action === "skip") {
+          results.push({
+            rowNum: item.rowNum,
+            transactionId: item.transactionId,
+            status: "skipped",
+            message: "Skipped by CA_Action=skip",
+          })
+          continue
         }
-        if (item.notes) payload.description = item.notes
 
-        const apiResult = await zohoPost<{ message: string }>(
-          `/bankaccounts/${item.bankAccountId}/statement/${item.transactionId}/categorize`,
-          args.organization_id,
-          payload
-        )
+        // Rate limit: 700 ms between API calls (not before the first call)
+        if (apiCallCount > 0) await sleep(700)
+        apiCallCount++
+
+        let apiResult: { ok: boolean; errorMessage?: string }
+        let successMessage: string
+
+        if (item.action === "exclude") {
+          // ── exclude: POST .../exclude ────────────────────────────────────────
+          apiResult = await zohoPost<{ message: string }>(
+            `/bankaccounts/${item.bankAccountId}/statement/${item.transactionId}/exclude`,
+            args.organization_id,
+            {}
+          )
+          successMessage = "Excluded"
+
+        } else if (item.action === "match") {
+          // ── match: POST .../match ────────────────────────────────────────────
+          // Determine whether matchId looks like an invoice or bill
+          // Zoho match payload: { transactions: [{ transaction_id, transaction_type }] }
+          const matchPayload: Record<string, unknown> = {
+            transactions: [
+              {
+                transaction_id: item.matchId,
+                transaction_type: "invoice",  // CA can override by putting bill_id in CA_Match_ID
+              },
+            ],
+          }
+          apiResult = await zohoPost<{ message: string }>(
+            `/bankaccounts/${item.bankAccountId}/statement/${item.transactionId}/match`,
+            args.organization_id,
+            matchPayload
+          )
+          successMessage = `Matched → ${item.matchId}`
+
+        } else {
+          // ── categorize (default): POST .../categorize ────────────────────────
+          const payload: Record<string, unknown> = {
+            transaction_type: item.transactionType,
+            account_id: item.accountId,
+            amount: item.amount,
+            date: item.date,
+          }
+          if (item.notes) payload.description = item.notes
+          apiResult = await zohoPost<{ message: string }>(
+            `/bankaccounts/${item.bankAccountId}/statement/${item.transactionId}/categorize`,
+            args.organization_id,
+            payload
+          )
+          successMessage = `Categorized → ${item.accountId} (${item.transactionType})`
+        }
 
         if (apiResult.ok) {
           auditSuccess(
@@ -729,7 +871,7 @@ Input: either csv_content (paste the CSV text) OR file_path (local file path).`,
             rowNum: item.rowNum,
             transactionId: item.transactionId,
             status: "success",
-            message: "Categorized",
+            message: successMessage,
           })
         } else {
           const errMsg = apiResult.errorMessage || "Unknown API error"

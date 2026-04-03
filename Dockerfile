@@ -42,11 +42,12 @@ USER mcp
 
 EXPOSE 8004
 
-ENV PORT=8004
+# Do NOT hardcode PORT — Railway injects its own PORT at runtime.
+# Setting it here would prevent Railway's value from taking effect.
 ENV HOST=0.0.0.0
 ENV NODE_ENV=production
 
-# Generous start period — npm install needs time on first boot
+# HEALTHCHECK uses shell form so ${PORT} resolves at runtime from Railway's env
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${PORT:-8004}/health || exit 1
 

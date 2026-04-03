@@ -1,53 +1,26 @@
-# ─── Zoho Bookkeeper MCP Server ──────────────────────────────────────────────
-# Multi-stage build — builder compiles TS, runtime is lean production image.
-# Node 22 required: pipenet (fastmcp dep) requires node>=22.
-# Uses npm install (not npm ci) — avoids lockfile version sync issues.
+# Zoho Bookkeeper MCP Server
+# Single-stage build — simpler, more reliable on Railway.
+# Node 22 required: fastmcp transitive dep (pipenet) requires node>=22.
 
-# ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM node:22-alpine AS builder
+FROM node:22-alpine
 
 WORKDIR /app
 
-# Copy package manifest only — install before copying source for layer caching
+# Install dependencies first (layer cache — only re-runs when package.json changes)
 COPY package.json ./
+RUN npm install
 
-# Full install (dev + prod) so TypeScript compiler and tsup are available
-RUN npm install --ignore-scripts
-
-# Copy source
+# Copy source and build
 COPY tsconfig.json tsup.config.ts ./
 COPY src/ ./src/
-
-# Compile TypeScript → dist/
 RUN npm run build
 
-# ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM node:22-alpine AS runtime
-
-WORKDIR /app
-
-# Security: run as non-root
-RUN addgroup -S mcp && adduser -S mcp -G mcp
-
-# Copy only package manifest — install production deps fresh
-COPY package.json ./
-
-RUN npm install --omit=dev --ignore-scripts && \
-    npm cache clean --force
-
-# Copy compiled output from builder
-COPY --from=builder /app/dist ./dist
-
-USER mcp
-
-EXPOSE 8004
-
-# Do NOT hardcode PORT — Railway injects its own PORT at runtime.
-# Setting it here would prevent Railway's value from taking effect.
+# Runtime environment
+# Do NOT set PORT here — Railway injects its own PORT at runtime
 ENV HOST=0.0.0.0
 ENV NODE_ENV=production
 
-# HEALTHCHECK uses shell form so ${PORT} resolves at runtime from Railway's env
+# Health check — uses Railway's injected PORT, falls back to 8004 locally
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${PORT:-8004}/health || exit 1
 

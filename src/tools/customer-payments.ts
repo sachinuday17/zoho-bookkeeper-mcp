@@ -104,9 +104,10 @@ India payment modes: neft, rtgs, imps, upi, bank_transfer`,
         .describe("Bank charges deducted (if any). Default: 0"),
       invoices: z
         .array(invoiceApplicationSchema)
-        .min(1)
+        .min(0)
         .max(10)
-        .describe("Invoices to apply this payment against. Sum of amount_applied must not exceed total amount."),
+        .optional()
+        .describe("Invoices to apply this payment against. Sum of amount_applied must not exceed total amount. Leave blank to record as advance payment."),
     }),
     annotations: {
       title: "Create Customer Payment",
@@ -114,14 +115,16 @@ India payment modes: neft, rtgs, imps, upi, bank_transfer`,
       openWorldHint: true,
     },
     execute: async (args) => {
+      const invoices = args.invoices ?? []
+
       // ── Guard 1: sum of applied must not exceed total ──────────────────────
-      const totalApplied = args.invoices.reduce((sum, inv) => sum + inv.amount_applied, 0)
+      const totalApplied = invoices.reduce((sum, inv) => sum + inv.amount_applied, 0)
       if (totalApplied > args.amount + 0.01) {
         return `❌ Validation failed: Total applied (INR ${totalApplied.toLocaleString("en-IN")}) exceeds payment amount (INR ${args.amount.toLocaleString("en-IN")}). Reduce amount_applied values.`
       }
 
       // ── Guard 2: check each invoice balance before posting ─────────────────
-      for (const inv of args.invoices) {
+      for (const inv of invoices) {
         const invResult = await zohoGet<{ invoice: any }>(
           `/invoices/${inv.invoice_id}`,
           args.organization_id
@@ -154,7 +157,7 @@ India payment modes: neft, rtgs, imps, upi, bank_transfer`,
         amount: args.amount,
         date: args.date,
         account_id: args.account_id,
-        invoices: args.invoices.map(inv => ({
+        invoices: invoices.map(inv => ({
           invoice_id: inv.invoice_id,
           amount_applied: inv.amount_applied,
         })),

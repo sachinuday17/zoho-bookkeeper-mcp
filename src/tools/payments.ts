@@ -77,59 +77,6 @@ Use for cash receipt reconciliation and AR review.`,
     },
   })
 
-  // ─── Create Customer Payment ─────────────────────────────────────────────
-
-  server.addTool({
-    name: "create_customer_payment",
-    description: `Record a customer payment in Zoho Books.
-Can be applied to one or more invoices in a single entry.
-Total of amount_applied across invoices must not exceed payment amount.
-Use for NEFT/RTGS/UPI receipts not linked to bank feed.`,
-    parameters: z.object({
-      organization_id: optionalOrganizationIdSchema,
-      customer_id: z.string().min(1),
-      amount: positiveAmountSchema.describe("Total payment amount received"),
-      date: dateSchema,
-      payment_mode: paymentModeSchema,
-      deposit_account_id: z.string().min(1).describe("Bank/cash account ID where money was received"),
-      reference_number: z.string().max(100).optional().describe("UTR / cheque number"),
-      description: z.string().max(500).optional(),
-      invoices: z.array(invoiceApplicationSchema).max(10).optional().describe("Invoices to apply payment to (optional — leave blank for advance)"),
-    }),
-    annotations: { title: "Create Customer Payment", readOnlyHint: false, openWorldHint: true },
-    execute: async (args) => {
-      // Guard: sum of applied amounts must not exceed total
-      if (args.invoices) {
-        const applied = args.invoices.reduce((s, i) => s + i.amount_applied, 0)
-        if (applied > args.amount + 0.01) {
-          return `Total applied (INR ${applied.toLocaleString("en-IN")}) exceeds payment amount (INR ${args.amount.toLocaleString("en-IN")}). Reduce the applied amounts.`
-        }
-      }
-
-      auditStart("create_customer_payment", args.organization_id, "WRITE", "payment", args)
-      const payload: Record<string, unknown> = {
-        customer_id: args.customer_id,
-        amount: args.amount,
-        date: args.date,
-        payment_mode: args.payment_mode,
-        account_id: args.deposit_account_id,
-      }
-      if (args.reference_number) payload.reference_number = args.reference_number
-      if (args.description) payload.description = args.description
-      if (args.invoices) payload.invoices = args.invoices
-
-      const result = await zohoPost<{ payment: any }>("/customerpayments", args.organization_id, payload)
-      if (!result.ok) {
-        auditFail("create_customer_payment", args.organization_id, "WRITE", "payment", result.errorMessage || "unknown")
-        return result.errorMessage || "Failed to record payment"
-      }
-      const pmt = result.data?.payment
-      auditSuccess("create_customer_payment", args.organization_id, "WRITE", "payment", pmt?.payment_id)
-      const unused = args.amount - (args.invoices?.reduce((s, i) => s + i.amount_applied, 0) || 0)
-      return `**Customer Payment Recorded**\n\n- Payment ID: \`${pmt?.payment_id}\`\n- Customer: ${pmt?.customer_name || args.customer_id}\n- Amount: INR ${args.amount.toLocaleString("en-IN")}\n- Mode: ${args.payment_mode}\n- Reference: ${args.reference_number || "N/A"}\n- Date: ${args.date}\n- Applied to ${args.invoices?.length || 0} invoice(s)\n- Unused Credit: INR ${unused.toLocaleString("en-IN")}`
-    },
-  })
-
   // ─── List Vendor Payments ────────────────────────────────────────────────
 
   server.addTool({

@@ -28,6 +28,7 @@ import { registerBankAccountTools } from "./tools/bank-accounts.js"
 import { registerBankReconciliationTools } from "./tools/bank-reconciliation.js"
 import { registerReconciliationExportTools } from "./tools/reconciliation-export.js"
 import { registerReconciliationAutoTools } from "./tools/reconciliation-auto.js"
+import { registerReconciliationPipelineTools } from "./tools/reconciliation-pipeline.js"
 import { registerPaymentTools } from "./tools/payments.js"
 import { registerCustomerPaymentTools } from "./tools/customer-payments.js"
 import { registerReportTools } from "./tools/reports.js"
@@ -72,14 +73,22 @@ It is accepted as an optional override if needed.
 - create_bank_rule, list_bank_rules — auto-categorization rules
 
 ### Zero-Touch Automation (for large-volume reconciliation)
-Recommended workflow — run in this order:
+
+#### One-Command Pipeline (recommended for month-end):
+  1. reconcile_account (dry_run: true)  — preview full pipeline: match + categorize in one call
+  2. reconcile_account (dry_run: false) — execute after reviewing the plan
+  3. verify_reconciliation              — confirm status dashboard after pipeline runs
+
+#### Step-by-step (for granular control):
   1. bulk_match_transactions (dry_run: true first)    — match credits→invoices, debits→bills
   2. auto_categorize_transactions (dry_run: true first) — AI categorizes High-confidence txns
   3. export_uncategorized_to_csv                       — remaining Low-confidence → Excel review
   4. import_approved_reconciliation                    — execute CA-approved rows from CSV
   5. suggest_and_create_bank_rules                     — create rules so next month is automatic
 
-- bulk_match_transactions           — auto-match bank credits to open invoices, debits to bills
+- reconcile_account                 — MASTER ORCHESTRATOR: Phase 1 match + Phase 2 AI categorize in one call
+- verify_reconciliation             — quick status dashboard: progress %, balance, uncategorized count
+- bulk_match_transactions           — auto-match bank credits to open invoices, debits to bills (with GST/TDS-adjusted matching)
 - auto_categorize_transactions      — AI keyword engine categorizes High-confidence transactions
 - suggest_and_create_bank_rules     — create bank rules for recurring payees (set and forget)
 - export_uncategorized_to_csv       — export remaining uncertain transactions for CA review
@@ -204,6 +213,7 @@ registerCustomerPaymentTools(server)
 registerBankAccountTools(server)
 registerBankReconciliationTools(server)
 registerReconciliationAutoTools(server)
+registerReconciliationPipelineTools(server)
 registerReconciliationExportTools(server)
 
 // Reports & GST

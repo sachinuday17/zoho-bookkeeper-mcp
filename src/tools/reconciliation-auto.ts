@@ -141,6 +141,34 @@ async function fetchCOA(organizationId: string | undefined): Promise<GLAccount[]
   return res.ok ? (res.data?.chartofaccounts ?? []) : []
 }
 
+/**
+ * Paginating fetch for invoices / bills.
+ * Fetches up to maxPages × 200 records.
+ */
+async function fetchAll<T>(
+  endpoint: string,
+  organizationId: string | undefined,
+  params: Record<string, string>,
+  dataKey: string,
+  maxPages = 5
+): Promise<T[]> {
+  const all: T[] = []
+  let page = 1
+  while (page <= maxPages) {
+    const res = await zohoGet<Record<string, T[]>>(
+      endpoint,
+      organizationId,
+      { ...params, per_page: "200", page: String(page) }
+    )
+    if (!res.ok) break
+    const batch = (res.data?.[dataKey] ?? []) as T[]
+    all.push(...batch)
+    if (batch.length < 200) break
+    page++
+  }
+  return all
+}
+
 /** Validate an ID is safe for use in a URL path (alphanumeric + _ -). */
 function isSafeId(id: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(id)
@@ -529,6 +557,25 @@ Confidence levels in output:
         .optional()
         .default(200)
         .describe("Max uncategorized transactions to scan (default 200)"),
+      date_start: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD")
+        .optional()
+        .describe("Only process transactions on or after this date"),
+      date_end: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD")
+        .optional()
+        .describe("Only process transactions on or before this date"),
+      match_adjusted: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Enable GST/TDS-adjusted matching (default: true). " +
+          "Credits: tries invoice_balance × 1.05/1.12/1.18/1.28 (GST). " +
+          "Debits: tries bill_balance × 0.90/0.92/0.98/0.99 (TDS deducted)."
+        ),
     }),
 
     annotations: { title: "Bulk Match Bank Transactions to Invoices/Bills", readOnlyHint: false, openWorldHint: true },
@@ -536,12 +583,20 @@ Confidence levels in output:
     execute: async (args) => {
       const tolAmount = args.tolerance_amount ?? 0
       const tolDays = args.tolerance_days ?? 7
+      const matchAdjusted = args.match_adjusted !== false
+
+      // GST multipliers for credit (invoice) matching
+      const GST_RATES = [1.05, 1.12, 1.18, 1.28]
+      // TDS deduction factors for debit (bill) matching
+      const TDS_FACTORS = [0.90, 0.92, 0.98, 0.99]
 
       // ── Fetch uncategorized transactions ──────────────────────────────────────
       const { txns, error: fetchErr } = await fetchUncategorized(
         args.account_id,
         args.organization_id,
-        args.max_transactions ?? 200
+        args.max_transactions ?? 200,
+        args.date_start,
+        args.date_end
       )
       if (fetchErr) return `Failed to fetch transactions: ${fetchErr}`
       if (txns.length === 0) return `✅ No uncategorized transactions for account \`${args.account_id}\`.`
@@ -550,26 +605,28 @@ Confidence levels in output:
       const credits = txns.filter(t => t.debit_or_credit === "credit")
       const debits = txns.filter(t => t.debit_or_credit === "debit")
 
-      // ── Fetch open invoices (for credit matching) ─────────────────────────────
+      // ── Fetch open invoices (paginated) ───────────────────────────────────────
       let invoices: Invoice[] = []
       if (credits.length > 0) {
-        const invRes = await zohoGet<{ invoices: Invoice[] }>(
+        invoices = await fetchAll<Invoice>(
           "/invoices",
           args.organization_id,
-          { status: "outstanding", per_page: "200" }
+          { status: "outstanding" },
+          "invoices",
+          5
         )
-        if (invRes.ok) invoices = invRes.data?.invoices ?? []
       }
 
-      // ── Fetch unpaid bills (for debit matching) ───────────────────────────────
+      // ── Fetch unpaid bills (paginated) ────────────────────────────────────────
       let bills: Bill[] = []
       if (debits.length > 0) {
-        const billRes = await zohoGet<{ bills: Bill[] }>(
+        bills = await fetchAll<Bill>(
           "/bills",
           args.organization_id,
-          { status: "unpaid", per_page: "200" }
+          { status: "unpaid" },
+          "bills",
+          5
         )
-        if (billRes.ok) bills = billRes.data?.bills ?? []
       }
 
       // ── Date difference helper ────────────────────────────────────────────────
@@ -591,55 +648,124 @@ Confidence levels in output:
         matchBalance: number
         dateDiff: number
         confidence: "exact" | "close"
+        matchNote: string
       }
 
       const candidates: MatchCandidate[] = []
 
       for (const txn of credits) {
         const txnAmt = Number(txn.amount)
+        let found = false
+
         for (const inv of invoices) {
           const invBal = Number(inv.balance)
           if (isNaN(txnAmt) || isNaN(invBal)) continue
-          if (Math.abs(txnAmt - invBal) > tolAmount) continue
+
           const dd = daysDiff(txn.date, inv.date)
           if (dd > tolDays) continue
 
-          candidates.push({
-            txn,
-            matchType: "invoice",
-            matchId: inv.invoice_id,
-            matchRef: inv.invoice_number,
-            matchParty: inv.customer_name,
-            txnAmount: txnAmt,
-            matchBalance: invBal,
-            dateDiff: dd,
-            confidence: Math.abs(txnAmt - invBal) === 0 && dd === 0 ? "exact" : "close",
-          })
-          break // one match per transaction
+          // Exact / tolerance match
+          if (Math.abs(txnAmt - invBal) <= tolAmount) {
+            const isExact = Math.abs(txnAmt - invBal) === 0 && dd === 0
+            candidates.push({
+              txn,
+              matchType: "invoice",
+              matchId: inv.invoice_id,
+              matchRef: inv.invoice_number,
+              matchParty: inv.customer_name,
+              txnAmount: txnAmt,
+              matchBalance: invBal,
+              dateDiff: dd,
+              confidence: isExact ? "exact" : "close",
+              matchNote: isExact ? "Exact match" : `Close match (diff ₹${Math.abs(txnAmt - invBal).toFixed(2)})`,
+            })
+            found = true
+            break
+          }
+
+          // GST-adjusted match
+          if (matchAdjusted) {
+            for (const rate of GST_RATES) {
+              const adjusted = invBal * rate
+              if (Math.abs(txnAmt - adjusted) <= tolAmount) {
+                const gstPct = Math.round((rate - 1) * 100)
+                candidates.push({
+                  txn,
+                  matchType: "invoice",
+                  matchId: inv.invoice_id,
+                  matchRef: inv.invoice_number,
+                  matchParty: inv.customer_name,
+                  txnAmount: txnAmt,
+                  matchBalance: invBal,
+                  dateDiff: dd,
+                  confidence: "close",
+                  matchNote: `GST-adjusted match (${gstPct}% GST — invoice balance × ${rate})`,
+                })
+                found = true
+                break
+              }
+            }
+          }
+
+          if (found) break
         }
       }
 
       for (const txn of debits) {
         const txnAmt = Number(txn.amount)
+        let found = false
+
         for (const bill of bills) {
           const billBal = Number(bill.balance)
           if (isNaN(txnAmt) || isNaN(billBal)) continue
-          if (Math.abs(txnAmt - billBal) > tolAmount) continue
+
           const dd = daysDiff(txn.date, bill.date)
           if (dd > tolDays) continue
 
-          candidates.push({
-            txn,
-            matchType: "bill",
-            matchId: bill.bill_id,
-            matchRef: bill.bill_number,
-            matchParty: bill.vendor_name,
-            txnAmount: txnAmt,
-            matchBalance: billBal,
-            dateDiff: dd,
-            confidence: Math.abs(txnAmt - billBal) === 0 && dd === 0 ? "exact" : "close",
-          })
-          break
+          // Exact / tolerance match
+          if (Math.abs(txnAmt - billBal) <= tolAmount) {
+            const isExact = Math.abs(txnAmt - billBal) === 0 && dd === 0
+            candidates.push({
+              txn,
+              matchType: "bill",
+              matchId: bill.bill_id,
+              matchRef: bill.bill_number,
+              matchParty: bill.vendor_name,
+              txnAmount: txnAmt,
+              matchBalance: billBal,
+              dateDiff: dd,
+              confidence: isExact ? "exact" : "close",
+              matchNote: isExact ? "Exact match" : `Close match (diff ₹${Math.abs(txnAmt - billBal).toFixed(2)})`,
+            })
+            found = true
+            break
+          }
+
+          // TDS-adjusted match (payment made = bill × (1 - TDS%))
+          if (matchAdjusted) {
+            for (const factor of TDS_FACTORS) {
+              const adjusted = billBal * factor
+              if (Math.abs(txnAmt - adjusted) <= tolAmount) {
+                const tdsPct = Math.round((1 - factor) * 100)
+                candidates.push({
+                  txn,
+                  matchType: "bill",
+                  matchId: bill.bill_id,
+                  matchRef: bill.bill_number,
+                  matchParty: bill.vendor_name,
+                  txnAmount: txnAmt,
+                  matchBalance: billBal,
+                  dateDiff: dd,
+                  confidence: "close",
+                  matchNote: `TDS-adjusted match (${tdsPct}% TDS deducted — bill balance × ${factor})`,
+                })
+                found = true
+                break
+              }
+            }
+          }
+
+          if (found) break
         }
       }
 
@@ -647,11 +773,16 @@ Confidence levels in output:
         return [
           `No matches found for account \`${args.account_id}\`.`,
           `Scanned: ${txns.length} uncategorized transactions | ${invoices.length} open invoices | ${bills.length} unpaid bills`,
-          `Tolerance: ±₹${tolAmount} / ±${tolDays} days`,
+          `Tolerance: ±₹${tolAmount} / ±${tolDays} days | Adjusted matching: ${matchAdjusted ? "on" : "off"}`,
           "",
           "Tip: increase tolerance_amount or tolerance_days to find near-matches.",
+          matchAdjusted ? "" : "Tip: set match_adjusted: true to try GST/TDS-adjusted amounts.",
         ].join("\n")
       }
+
+      const exactCount = candidates.filter(c => c.confidence === "exact").length
+      const adjustedCount = candidates.filter(c => c.matchNote.includes("adjusted")).length
+      const closeCount = candidates.length - exactCount - adjustedCount
 
       // ── Dry run ───────────────────────────────────────────────────────────────
       if (args.dry_run) {
@@ -659,15 +790,16 @@ Confidence levels in output:
           `**Bulk Match Preview (Dry Run)** — Account \`${args.account_id}\``,
           `Found ${candidates.length} match candidate(s) from ${txns.length} transactions`,
           `Invoices scanned: ${invoices.length} | Bills scanned: ${bills.length}`,
+          `Exact: ${exactCount} | Close: ${closeCount} | Adjusted (GST/TDS): ${adjustedCount}`,
           "",
-          "| Date | Amount | Payee | Matches | Type | Ref | Confidence |",
-          "|------|--------|-------|---------|------|-----|------------|",
+          "| Date | Amount | Payee | Matches | Type | Ref | Confidence | Note |",
+          "|------|--------|-------|---------|------|-----|------------|------|",
         ]
         for (const c of candidates) {
           lines.push(
             `| ${c.txn.date} | INR ${c.txnAmount.toLocaleString("en-IN")} | ` +
             `${c.txn.payee || "?"} | ${c.matchParty} | ${c.matchType} | ` +
-            `${c.matchRef} | ${c.confidence} |`
+            `${c.matchRef} | ${c.confidence} | ${c.matchNote} |`
           )
         }
         lines.push("")
@@ -720,6 +852,7 @@ Confidence levels in output:
       const lines = [
         `${icon} **Bulk Match Complete** — Account \`${args.account_id}\``,
         `Matched: ${successCount} | Failed: ${failedCount}`,
+        `Exact: ${exactCount} | Close: ${closeCount} | Adjusted (GST/TDS): ${adjustedCount}`,
         "",
       ]
       if (failedCount > 0) {
@@ -777,10 +910,7 @@ Run suggest_only: true first to see the recommended payee list before providing 
         .array(z.object({
           payee_keyword: z.string().min(1).max(100).describe("The payee name/keyword to match (case-insensitive contains)"),
           gl_account_id: entityIdSchema.describe("GL account ID from list_accounts"),
-          transaction_type: z.enum([
-            "expense", "deposit", "transfer_fund",
-            "owner_contribution", "owner_drawings", "other_income", "refund",
-          ]).describe("Zoho transaction type for this rule"),
+          direction: z.enum(["debit", "credit"]).describe("Transaction direction: 'debit' = money out (expense), 'credit' = money in (income/deposit)"),
         }))
         .optional()
         .describe("CA-approved account mappings per payee. Required if suggest_only: false."),
@@ -858,19 +988,19 @@ Run suggest_only: true first to see the recommended payee list before providing 
         } else {
           lines.push("**Provide these as rule_mappings to create bank rules:**")
           lines.push("")
-          lines.push("| # | Payee | Count | Total | Direction | Suggested Category | Suggested Type |")
-          lines.push("|---|-------|-------|-------|-----------|-------------------|----------------|")
+          lines.push("| # | Payee | Count | Total | Direction | Suggested Category | Confidence |")
+          lines.push("|---|-------|-------|-------|-----------|-------------------|------------|")
 
           for (const [i, g] of recurring.entries()) {
             lines.push(
               `| ${i + 1} | ${g.rawPayee.slice(0, 40)} | ${g.count}× | ` +
               `INR ${g.totalAmt.toLocaleString("en-IN")} | ${g.direction} | ` +
-              `${g.suggestion.category} (${g.suggestion.confidence}) | ${g.suggestion.transaction_type} |`
+              `${g.suggestion.category} | ${g.suggestion.confidence} |`
             )
           }
 
           lines.push("")
-          lines.push("**Next step:** Call this tool again with rule_mappings=[{payee_keyword, gl_account_id, transaction_type}, ...] and dry_run: true")
+          lines.push("**Next step:** Call this tool again with rule_mappings=[{payee_keyword, gl_account_id, direction}, ...] and dry_run: true")
           lines.push("Run list_accounts to get gl_account_id values.")
         }
 
@@ -898,13 +1028,14 @@ Run suggest_only: true first to see the recommended payee list before providing 
       if (args.dry_run) {
         const lines = [
           `**Bank Rule Creation Preview (Dry Run)**`,
-          `Would create ${mappings.length} bank rule(s):`,
+          `Would create ${mappings.length} bank rule(s) for account \`${args.account_id}\`:`,
           "",
-          "| Payee Keyword | GL Account ID | Type |",
-          "|---------------|---------------|------|",
+          "| Payee Keyword | GL Account ID | Direction | Rule Name |",
+          "|---------------|---------------|-----------|-----------|",
         ]
         for (const m of mappings) {
-          lines.push(`| ${m.payee_keyword} | \`${m.gl_account_id}\` | ${m.transaction_type} |`)
+          const ruleName = `Auto: ${m.payee_keyword.slice(0, 50)} - ${args.account_id.slice(-6)}`
+          lines.push(`| ${m.payee_keyword} | \`${m.gl_account_id}\` | ${m.direction} | ${ruleName} |`)
         }
         lines.push("")
         lines.push("Set dry_run: false to create these rules in Zoho Books.")
@@ -926,17 +1057,18 @@ Run suggest_only: true first to see the recommended payee list before providing 
         if (i > 0) await sleep(700)
 
         const rulePayload: Record<string, unknown> = {
-          rule_name: `Auto: ${m.payee_keyword.slice(0, 50)}`,
-          apply_to: "uncategorized",
+          rule_name: `Auto: ${m.payee_keyword.slice(0, 50)} - ${args.account_id.slice(-6)}`,
+          account_id: args.account_id,
+          transaction_type: m.direction,
           criteria: [
             {
-              criteria_type: "payee",
+              criteria_field: "payee",
               criteria_condition: "contains",
               criteria_value: m.payee_keyword,
             },
           ],
+          action_categorize_as: "expense",
           action_account_id: m.gl_account_id,
-          transaction_type: m.transaction_type,
         }
 
         const res = await zohoPost<{ rule: { rule_id: string } }>(

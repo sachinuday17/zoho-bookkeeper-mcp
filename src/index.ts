@@ -26,6 +26,7 @@ import { registerContactTools } from "./tools/contacts.js"
 import { registerContactWriteTools } from "./tools/contacts-write.js"
 import { registerBankAccountTools } from "./tools/bank-accounts.js"
 import { registerBankReconciliationTools } from "./tools/bank-reconciliation.js"
+import { registerReconciliationExportTools } from "./tools/reconciliation-export.js"
 import { registerPaymentTools } from "./tools/payments.js"
 import { registerCustomerPaymentTools } from "./tools/customer-payments.js"
 import { registerReportTools } from "./tools/reports.js"
@@ -68,6 +69,11 @@ It is accepted as an optional override if needed.
 - exclude_bank_transaction       — exclude duplicates/transfers
 - bulk_categorize_transactions   — batch process multiple entries
 - create_bank_rule, list_bank_rules — auto-categorization rules
+
+### CA Approval Pipeline (Recommended for bulk reconciliation)
+- export_uncategorized_to_csv    — export all uncategorized txns with AI suggestions to CSV
+- import_approved_reconciliation — execute rows marked Approve=Y in the CA-reviewed CSV
+Workflow: export → CA reviews in Excel → marks Approve=Y → import executes in Zoho
 
 ### Bank Accounts
 - list_bank_accounts, get_bank_account, list_bank_transactions
@@ -184,8 +190,10 @@ registerCustomerPaymentTools(server)
 // Banking & Reconciliation
 // Note: bank-accounts.ts contains ONLY list/get/transactions
 //       bank-reconciliation.ts owns ALL statement-feed and categorization tools
+//       reconciliation-export.ts owns the CA approval pipeline (export/import CSV)
 registerBankAccountTools(server)
 registerBankReconciliationTools(server)
+registerReconciliationExportTools(server)
 
 // Reports & GST
 registerReportTools(server)
